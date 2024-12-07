@@ -7,6 +7,7 @@ import time
 import sqlite3
 import requests
 from urllib.parse import urlparse
+import time
 
 import plugins
 from bridge.context import ContextType
@@ -31,18 +32,21 @@ class Summary(Plugin):
     open_ai_api_base = "https://api.openai.com/v1"
     open_ai_model = "gpt-4o-mini"
     max_tokens = 1500
+    max_input_tokens = 4000  # 默认限制输入4000个token
     prompt = '''
     你是一个聊天记录总结的AI助手。
-    1. 尝试做群聊总结，突出主题，不要搞非常泛泛的总结；
-    2. 尽量突出重要内容以及关键信息（重要的关键字/数据等），请在总结中呈现出来；
+    1. 做群聊总结和摘要，主次层次分明；
+    2. 尽量突出重要内容以及关键信息（重要的关键字/数据/观点/结论等），请表达呈现出来，避免过于简略而丢失信息量；
     3. 允许有多个主题/话题，分开描述；
     4. 弱化非关键发言人的对话内容。
     5. 如果把多个小话题合并成1个话题能更完整的体现对话内容，可以考虑合并，否则不合并；
 格式：
-话题1：{时间段}一段话陈述过程，避免列表形式
-话题2: ……
-……
-话题N：……
+1️⃣{Topic}{热度(用1-5个🔥表示)}
+• 时间：{时:分} - {时:分}(不显示年月日)
+• 参与者：
+• 内容：
+• 结论：
+………
 
 聊天记录格式：
 [x]是emoji表情或者是对图片和声音文件的说明，消息最后出现<T>表示消息触发了群聊机器人的回复，内容通常是提问，若带有特殊符号如#和$则是触发你无法感知的某个插件功能，聊天记录中不包含你对这类消息的回复，可降低这些消息的权重。请不要在回复中包含聊天记录格式中出现的符号。'''
@@ -62,7 +66,7 @@ class Summary(Plugin):
                 
             self.open_ai_model = self.config.get("open_ai_model", self.open_ai_model)
             self.max_tokens = self.config.get("max_tokens", self.max_tokens)
-            self.max_words = self.config.get("max_words", self.max_words)
+            self.max_input_tokens = self.config.get("max_input_tokens", self.max_input_tokens)  # 默认限制输入4000个token
             self.prompt = self.config.get("prompt", self.prompt)
 
             # Initialize database
@@ -209,10 +213,14 @@ class Summary(Plugin):
 
     def _check_tokens(self, records, max_tokens=3600):
         """Prepare chat content for summarization"""
-        query = ""
-        for record in records[::-1]:
-            username = record[2]
-            content = record[3]
+        messages = []
+        total_length = 0
+        max_input_chars = self.max_input_tokens * 4  # 粗略估计：1个token约等于4个字符
+        
+        # 记录已经是倒序的（最新的在前），直接处理
+        for record in records:
+            username = record[2] or ""  # Handle None username
+            content = record[3] or ""   # Handle None content
             timestamp = record[5]
             is_triggered = record[6]
             
@@ -222,12 +230,20 @@ class Summary(Plugin):
             if record[4] in [str(ContextType.IMAGE),str(ContextType.VOICE)]:
                 content = f"[{record[4]}]"
             
-            sentence = ""
-            sentence += f'[{time_str}] {username}' + ": \"" + content + "\""
+            sentence = f'[{time_str}] {username}: "{content}"'
             if is_triggered:
                 sentence += " <T>"
-            query += "\n\n"+sentence
+                
+            # 检查添加这条记录后是否会超出限制
+            if total_length + len(sentence) + 2 > max_input_chars:  # 2是换行符的长度
+                logger.info(f"[Summary] Input length limit reached at {total_length} chars")
+                break
+                
+            messages.append(sentence)
+            total_length += len(sentence) + 2
 
+        # 将消息按时间顺序拼接（从早到晚）
+        query = "\n\n".join(messages[::-1])
         return f"{self.prompt}\n\n需要你总结的聊天记录如下：{query}"
 
     def _split_messages_to_summarys(self, records, max_tokens_persession=3600, max_summarys=8):
@@ -267,7 +283,15 @@ class Summary(Plugin):
             
             if len(clist) > 1:
                 try:
-                    limit = int(clist[1])
+                    # 第一个参数作为时间偏移（秒）
+                    start_time = int(time.time()) + int(clist[1])
+                except:
+                    pass
+                
+            if len(clist) > 2:
+                try:
+                    # 第二个参数作为消息数量限制
+                    limit = int(clist[2])
                 except:
                     pass
 
