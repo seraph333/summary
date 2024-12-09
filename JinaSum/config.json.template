@@ -1,0 +1,11 @@
+{
+  "jina_reader_base": "https://r.jina.ai",
+  "open_ai_api_base": "https://api.openai.com/v1",
+  "open_ai_api_key":  "sk-xxxxx",
+  "open_ai_model": "gpt-4o-mini",
+  "max_words": 8000,
+  "white_url_list": [],
+  "black_url_list": ["https://support.weixin.qq.com", "https://channels-aladin.wxqcloud.qq.com"],
+  "generate_image": true,
+  "prompt": "{\"Title\":\"{{文章/新闻/公众号标题}}\",\"Date\":\"{{发布日期, 格式: YYYY-MM-DD}}\",\"Author\":\"{{作者名称}}\",\"Content\":{\"Summary\":\"请对以下文章/新闻/公众号内容进行摘要，不超过300字，并提炼出核心观点和关键信息。要求语言简洁、准确、客观，并保持原文的主要意思。请不要添加个人评论或解读，仅对原文内容进行概括。\\n\\n{{文章/新闻/公众号正文}}\",\"Tags\":\"请为以下文章/新闻/公众号内容提炼出3-5个关键词作为标签，用逗号分隔。\\n\\n{{文章/新闻/公众号正文}}\"}}"
+}
