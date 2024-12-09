@@ -25,7 +25,7 @@ class JinaSum(Plugin):
 
     jina_reader_base = "https://r.jina.ai"
     open_ai_api_base = "https://api.openai.com/v1"
-    open_ai_model = "gpt-3.5-turbo"
+    open_ai_model = "gpt-4o-mini"
     max_words = 8000
     prompt = "我需要对下面引号内文档进行总结，总结输出包括以下三个部分：\n📖 一句话总结\n🔑 关键要点,用数字序号列出3-5个文章的核心内容\n🏷 标签: #xx #xx\n请使用emoji让你的表达更生动\n\n"
     white_url_list = []
@@ -48,6 +48,7 @@ class JinaSum(Plugin):
             self.prompt = self.config.get("prompt", self.prompt)
             self.white_url_list = self.config.get("white_url_list", self.white_url_list)
             self.black_url_list = self.config.get("black_url_list", self.black_url_list)
+            self.generate_image = self.config.get("generate_image", True)
             logger.info(f"[JinaSum] inited, config={self.config}")
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
         except Exception as e:
@@ -63,11 +64,6 @@ class JinaSum(Plugin):
             if not self._check_url(content):
                 logger.debug(f"[JinaSum] {content} is not a valid url, skip")
                 return
-            if retry_count == 0:
-                logger.debug("[JinaSum] on_handle_context. content: %s" % content)
-                reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
-                channel = e_context["channel"]
-                channel.send(reply, context)
 
             target_url = html.unescape(content) # 解决公众号卡片链接校验问题，参考 https://github.com/fatwang2/sum4all/commit/b983c49473fc55f13ba2c44e4d8b226db3517c45
             jina_url = self._get_jina_url(target_url)
@@ -83,7 +79,50 @@ class JinaSum(Plugin):
             response = requests.post(openai_chat_url, headers={**openai_headers, **headers}, json=openai_payload, timeout=60)
             response.raise_for_status()
             result = response.json()['choices'][0]['message']['content']
-            reply = Reply(ReplyType.TEXT, result)
+            
+            # 打印原始返回内容到日志
+            logger.info(f"[JinaSum] LLM返回内容：\n{result}")
+            
+            # 解析LLM返回的JSON内容
+            try:
+                summary_data = json.loads(result)
+                # 合并Summary和Tags
+                summary = summary_data['Content']['Summary']
+                tags = summary_data['Content']['Tags']
+                summary_content = f"{summary}\n\n🏷 {tags}"
+                
+                if self.generate_image:
+                    # 生成图片
+                    date = summary_data['Date']
+                    title = summary_data['Title']
+                    author = summary_data['Author']
+                    
+                    image_content = self._save_summary_as_image(
+                        summary_content=summary_content,
+                        date=f"{date}日",
+                        title=title,
+                        author=author
+                    )
+                    if image_content:
+                       # 保存为内存文件对象
+                        import io
+                        image_storage = io.BytesIO(image_content)
+                        reply = Reply(ReplyType.IMAGE, image_storage)
+                    else:
+                        reply = Reply(ReplyType.ERROR, "生成图片总结失败")
+                else:
+                    # 直接返回文字摘要
+                    reply = Reply(ReplyType.TEXT, summary_content)
+            except json.JSONDecodeError as e:
+                logger.error(f"[JinaSum] JSON解析失败：{str(e)}")
+                reply = Reply(ReplyType.ERROR, "解析总结内容失败")
+            except KeyError as e:
+                logger.error(f"[JinaSum] 缺少必要的字段：{str(e)}")
+                reply = Reply(ReplyType.ERROR, "总结内容格式错误")
+            except Exception as e:
+                logger.error(f"[JinaSum] 处理总结内容失败：{str(e)}")
+                reply = Reply(ReplyType.ERROR, "处理总结内容失败")
+            
             e_context["reply"] = reply
             e_context.action = EventAction.BREAK_PASS
 
@@ -99,7 +138,7 @@ class JinaSum(Plugin):
             e_context.action = EventAction.BREAK_PASS
 
     def get_help_text(self, verbose, **kwargs):
-        return f'使用jina reader和ChatGPT总结网页链接内容'
+        return f'使用Jina Reader抓取页面内容，并使用LLM总结网页链接内容，并可以生成图片总结。'
 
     def _load_config_template(self):
         logger.debug("No Suno plugin config.json, use plugins/jina_sum/config.json.template")
@@ -151,3 +190,59 @@ class JinaSum(Plugin):
                 return False
 
         return True
+
+    def _save_summary_as_image(self, summary_content, date=None, title=None, author=None):
+        """
+        将总结内容转换为图片
+        Args:
+            summary_content: 总结内容
+            date: 日期，默认为当前日期
+            title: 标题，默认为"📝 内容总结"
+            author: 作者，默认为"AI助手"
+        Returns:
+            bytes: 图片内容（二进制格式）或None（如果转换失败）
+        """
+        try:
+            api_url = "https://fireflycard-api.302ai.cn/api/saveImg"
+            data = {
+                "icon": "https://mrxc-1300093961.cos.ap-shanghai.myqcloud.com/2024/12/8/1865676194712899585.png",
+                "date": date or "2024年12月8日",
+                "title": title or "📝 内容总结",
+                "author": author or "AI助手",
+                "content": summary_content,
+                "font": "Noto Sans SC",
+                "fontStyle": "Regular",
+                "titleFontSize": 36,
+                "contentFontSize": 28,
+                "contentLineHeight": 44,
+                "contentColor": "#333333",
+                "backgroundColor": "#FFFFFF",
+                "width": 440,
+                "height": 0,
+                "useFont": "MiSans-Thin",
+                "fontScale": 0.7,
+                "ratio": "Auto",
+                "padding": 15,
+                "watermark": "蓝胖子速递",
+                "qrCodeTitle": "<p>蓝胖子速递</p>",
+                "qrCode": "https://u.wechat.com/MLCKhcLlexXLmy3Jp3FM9QE",
+                "watermarkText": "",
+                "watermarkColor": "#999999",
+                "watermarkSize": 24,
+                "watermarkGap": 20,
+                "exportType": "png",
+                "exportQuality": 100
+            }
+            
+            response = requests.post(api_url, json=data, timeout=30)
+            response.raise_for_status()
+            
+            if response.headers.get('content-type', '').startswith('image/'):
+                logger.info("[JinaSum] 成功生成图片")
+                return response.content
+            
+            logger.error("[JinaSum] 生成图片失败：响应格式错误")
+            return None
+        except Exception as e:
+            logger.error(f"[JinaSum] 生成图片失败：{str(e)}")
+            return None
