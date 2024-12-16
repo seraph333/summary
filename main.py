@@ -28,27 +28,33 @@ class Summary(Plugin):
     # 默认配置值
     open_ai_api_base = "https://api.openai.com/v1"
     open_ai_model = "gpt-4o-mini"
-    max_tokens = 2000
-    max_input_tokens = 8000  # 默认限制输入 8000 个 token
+    summary_max_tokens = 2000
+    input_max_tokens_limit = 8000  # 默认限制输入 8000 个 token
     prompt = '''
-    你是一个聊天记录总结的AI助手，以下是默认规则和格式，如果有用户特定指令，以用户指令为准：
-    1. 做群聊总结和摘要，主次层次分明；
-    2. 尽量突出重要内容以及关键信息（重要的关键字/数据/观点/结论等），请表达呈现出来，避免过于简略而丢失信息量；
-    3. 允许有多个主题/话题，分开描述；
-    4. 弱化非关键发言人的对话内容。
-    5. 如果把多个小话题合并成1个话题能更完整的体现对话内容，可以考虑合并，否则不合并；
-格式：
-1️⃣[Topic][热度(用1-5个🔥表示)]
-• 时间：月-日 时:分 - -日 时:分(不显示年)
-• 参与者：
-• 内容：
-• 结论：
-………
+**核心规则：**
+1. **指令优先级：**
+    *   **最高优先级：** 用户特定指令:{custom_prompt} **，如果涉及总结可以参考总结的规则，否则只遵循用户特定指令执行。
+    *   **次优先级：** 在指令为无时，执行默认的总结操作。
 
-用户指令:{custom_prompt}
+2.  **默认总结规则（仅在满足次优先级条件时执行）：**
+    *   做群聊总结和摘要，主次层次分明；
+    *   尽量突出重要内容以及关键信息（重要的关键字/数据/观点/结论等），请表达呈现出来，避免过于简略而丢失信息量；
+    *   允许有多个主题/话题，分开描述；
+    *   弱化非关键发言人的对话内容。
+    *   如果把多个小话题合并成1个话题能更完整的体现对话内容，可以考虑合并，否则不合并；
+    *   主题总数量不设限制，确实多就多列。
+    *   格式：
+        1️⃣[Topic][热度(用1-5个🔥表示)]
+        • 时间：月-日 时:分 - -日 时:分(不显示年)
+        • 参与者：
+        • 内容：
+        • 结论：
+    ………
 
 聊天记录格式：
-[x]是emoji表情或者是对图片和声音文件的说明，消息最后出现<T>表示消息触发了群聊机器人的回复，内容通常是提问，若带有特殊符号如#和$则是触发你无法感知的某个插件功能，聊天记录中不包含你对这类消息的回复，可降低这些消息的权重。请不要在回复中包含聊天记录格式中出现的符号。'''
+[x]是emoji表情或者是对图片和声音文件的说明，消息最后出现<T>表示消息触发了群聊机器人的回复，内容通常是提问，若带有特殊符号如#和$则是触发你无法感知的某个插件功能，聊天记录中不包含你对这类消息的回复，可降低这些消息的权重。请不要在回复中包含聊天记录格式中出现的符号。
+
+'''
 
     def __init__(self):
         super().__init__()
@@ -64,9 +70,12 @@ class Summary(Plugin):
                 raise Exception("API 密钥未配置")
                 
             self.open_ai_model = self.config.get("open_ai_model", self.open_ai_model)
-            self.max_tokens = self.config.get("max_tokens", self.max_tokens)
-            self.max_input_tokens = self.config.get("max_input_tokens", self.max_input_tokens)
+            # 修改变量名
+            self.summary_max_tokens = self.config.get("max_tokens", self.summary_max_tokens)
+            self.input_max_tokens_limit = self.config.get("max_input_tokens", self.input_max_tokens_limit)
             self.prompt = self.config.get("prompt", self.prompt)
+            # 新增 chunk_max_tokens 从 config 加载，默认值是 3600
+            self.chunk_max_tokens = self.config.get("max_tokens_persession", 3600)
 
             # 初始化数据库
             curdir = os.path.dirname(__file__)
@@ -131,7 +140,7 @@ class Summary(Plugin):
         return {
             'model': self.open_ai_model,
             'messages': messages,
-            'max_tokens': self.max_tokens
+            'max_tokens': self.summary_max_tokens #修改变量名
         }
 
     def _chat_completion(self, content, custom_prompt=None):
@@ -145,14 +154,13 @@ class Summary(Plugin):
         try:
             # 使用默认 prompt
             prompt_to_use = self.prompt
+
+            # 使用 custom_prompt，如果 custom_prompt 为空，则替换为 "无"
+            replacement_prompt = custom_prompt if custom_prompt else "无"
+            prompt_to_use = prompt_to_use.replace("{custom_prompt}", replacement_prompt)
+
             
-            # 如果提供了自定义 prompt，则替换占位符
-            if custom_prompt is not None:
-                # 如果 custom_prompt 为 "无"，则使用空字符串
-                replacement_prompt = "" if custom_prompt == "无" else custom_prompt
-                prompt_to_use = prompt_to_use.replace("{custom_prompt}", replacement_prompt)
-            
-            # 打印完整的提示词
+            # 增加日志：打印完整提示词
             logger.info(f"[Summary] 完整提示词: {prompt_to_use}")
             
             # 准备完整的载荷
@@ -162,7 +170,7 @@ class Summary(Plugin):
                     {"role": "system", "content": prompt_to_use},
                     {"role": "user", "content": content}
                 ],
-                "max_tokens": self.max_tokens
+                "max_tokens": self.summary_max_tokens #修改变量名
             }
             
             # 获取 OpenAI API URL 和请求头
@@ -233,11 +241,12 @@ class Summary(Plugin):
         self._insert_record(session_id, cmsg.msg_id, username, context.content, str(context.type), cmsg.create_time, int(is_triggered))
         logger.debug("[Summary] {}:{} ({})" .format(username, context.content, session_id))
 
-    def _check_tokens(self, records, max_tokens=3600):
+    def _check_tokens(self, records, max_tokens=None):  # 添加默认值
         """准备用于总结的聊天内容"""
         messages = []
         total_length = 0
-        max_input_chars = self.max_input_tokens * 4  # 粗略估计：1个 token 约等于 4 个字符
+        # 修改变量名
+        max_input_chars = self.input_max_tokens_limit * 4  # 粗略估计：1个 token 约等于 4 个字符
         
         # 记录已经是倒序的（最新的在前），直接处理
         for record in records:
@@ -268,13 +277,14 @@ class Summary(Plugin):
         query = "\n\n".join(messages[::-1])
         return query
 
-    def _split_messages_to_summarys(self, records, custom_prompt="", max_tokens_persession=3600, max_summarys=8):
+    def _split_messages_to_summarys(self, records, custom_prompt="", max_summarys=10):
         """将消息分割成块并总结每个块"""
         summarys = []
         count = 0
 
         while len(records) > 0 and len(summarys) < max_summarys:
-            query = self._check_tokens(records, max_tokens_persession)
+            # 修改变量名
+            query = self._check_tokens(records) # 移除 max_tokens
             if not query:
                 break
 
@@ -287,11 +297,28 @@ class Summary(Plugin):
                 logger.error(f"[Summary] 总结失败: {e}")
                 break
 
-            if len(records) > max_tokens_persession:
-                records = records[max_tokens_persession:]
+            # 修改变量名，使用字符长度判断
+            query_chars_len = len(self._check_tokens(records))
+            if query_chars_len > (self.chunk_max_tokens*4):
+               records_temp = self._check_tokens(records)[:(self.chunk_max_tokens*4)] # 截取字符
+               
+               #找到截取字符对应的记录条数
+               record_count = 0
+               temp_records = []
+               for record in records:
+                  record_content = f'[{time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record[5]))}] {record[2] or ""}: "{record[3] or ""}"'
+                  if record[6]:
+                        record_content += " <T>"
+                  
+                  if len("\n\n".join(temp_records+[record_content])) <= (self.chunk_max_tokens*4):
+                    temp_records.append(record_content)
+                    record_count = record_count + 1
+                  else:
+                      break
+               
+               records = records[record_count:]
             else:
                 break
-
         return summarys
 
     def _parse_summary_command(self, command_parts):
