@@ -9,13 +9,14 @@ from plugins import *
 from config import conf
 import json
 import os
+import datetime
 
 @plugins.register(
     name="Hello",
     desire_priority=-1,
     hidden=True,
     desc="A simple plugin that says hello",
-    version="0.2",
+    version="0.3",
     author="lanvent",
 )
 class Hello(Plugin):
@@ -42,6 +43,11 @@ class Hello(Plugin):
             logger.error(f"[Hello]初始化异常：{e}")
             raise "[Hello] init failed, ignore "
 
+    def _append_time_suffix(self, prompt):
+        now = datetime.datetime.now()
+        time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        return f"{prompt} 当前时间是{time_str}。"
+
     def on_handle_context(self, e_context: EventContext):
         if e_context["context"].type not in [
             ContextType.TEXT,
@@ -65,7 +71,7 @@ class Hello(Plugin):
                 e_context.action = EventAction.BREAK_PASS
                 return
             e_context["context"].type = ContextType.TEXT
-            e_context["context"].content = self.group_welc_prompt.format(nickname=msg.actual_user_nickname)
+            e_context["context"].content = self._append_time_suffix(self.group_welc_prompt.format(nickname=msg.actual_user_nickname))
             e_context.action = EventAction.BREAK
             if not self.config or not self.config.get("use_character_desc"):
                 e_context["context"]["generate_breaked_by"] = EventAction.BREAK
@@ -81,7 +87,7 @@ class Hello(Plugin):
                 return
             if conf().get("group_chat_exit_group"):
                 e_context["context"].type = ContextType.TEXT
-                e_context["context"].content = self.group_exit_prompt.format(nickname=msg.actual_user_nickname)
+                e_context["context"].content = self._append_time_suffix(self.group_exit_prompt.format(nickname=msg.actual_user_nickname))
                 e_context.action = EventAction.BREAK
                 return
             e_context.action = EventAction.BREAK
@@ -89,7 +95,7 @@ class Hello(Plugin):
 
         if e_context["context"].type == ContextType.PATPAT:
             e_context["context"].type = ContextType.TEXT
-            e_context["context"].content = self.patpat_prompt
+            e_context["context"].content = self._append_time_suffix(self.patpat_prompt.format(nickname=msg.actual_user_nickname))
             e_context.action = EventAction.BREAK  # 交给LLM处理
             if not self.config or not self.config.get("use_character_desc"):
                 e_context["context"]["generate_breaked_by"] = EventAction.BREAK
@@ -106,9 +112,6 @@ class Hello(Plugin):
             e_context["reply"] = reply
             e_context.action = EventAction.BREAK_PASS  # 拦截，不再往下处理
             return
-
-        # 删除原有的 Hello 和 Hi 的处理逻辑
-        # 现在统一使用 hi_keywords 和 hi_prompt 处理
 
         if content == "End":
             e_context["context"].type = ContextType.IMAGE_CREATE
