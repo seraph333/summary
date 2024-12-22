@@ -4,6 +4,10 @@
     "open_ai_api_base": "https://api.open.com/v1",
     "open_ai_api_key": "sk-xxx",
     "open_ai_model": "gpt-4o-mini",
-    "max_words": 2500,
-    "max_input_tokens": 4000
+    "multimodal_llm_api_base": "https://api.72live.com/v1",
+    "multimodal_llm_model": "GLM-4V-Flash",
+    "multimodal_llm_api_key": "sk-xxx",
+    "summary_max_tokens": 8000,
+    "input_max_tokens_limit": 160000,
+    "chunk_max_tokens": 16000
 }
