@@ -1,11 +1,17 @@
 # encoding:utf-8
+# 当前版本要对图片转文字生效，需要修改/app/channel/wechat/wechat_message.py的第32行self._prepare_fn = lambda: itchat_msg.download(self.content)加入一行self._prepare_fn()
 
+import asyncio
 import json
 import os
 import time
 import sqlite3
 import requests
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
+import base64
+from io import BytesIO
+from PIL import Image
 
 import plugins
 from bridge.context import ContextType
@@ -15,13 +21,14 @@ from channel.chat_message import ChatMessage
 from common.log import logger
 from plugins import *
 
+
 @plugins.register(
     name="Summary",
     desire_priority=10,
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.0",
+    version="1.1",
     author="lanvent",
 )
 class Summary(Plugin):
@@ -55,6 +62,10 @@ class Summary(Plugin):
 [x]是emoji表情或者是对图片和声音文件的说明，消息最后出现<T>表示消息触发了群聊机器人的回复，内容通常是提问，若带有特殊符号如#和$则是触发你无法感知的某个插件功能，聊天记录中不包含你对这类消息的回复，可降低这些消息的权重。请不要在回复中包含聊天记录格式中出现的符号。
 
 '''
+    #新增的多模态LLM配置
+    multimodal_llm_api_base = ""
+    multimodal_llm_model = ""
+    multimodal_llm_api_key = ""
 
     def __init__(self):
         super().__init__()
@@ -66,8 +77,8 @@ class Summary(Plugin):
             
             # 验证 API 密钥
             if not self.open_ai_api_key:
-                logger.error("[Summary] API 密钥未在配置中找到")
-                raise Exception("API 密钥未配置")
+                logger.error("[Summary] OpenAI API 密钥未在配置中找到")
+                raise Exception("OpenAI API 密钥未配置")
                 
             self.open_ai_model = self.config.get("open_ai_model", self.open_ai_model)
             # 修改变量名
@@ -77,11 +88,25 @@ class Summary(Plugin):
             # 新增 chunk_max_tokens 从 config 加载，默认值是 3600
             self.chunk_max_tokens = self.config.get("max_tokens_persession", 3600)
 
+            #加载多模态LLM配置
+            self.multimodal_llm_api_base = self.config.get("multimodal_llm_api_base", "")
+            self.multimodal_llm_model = self.config.get("multimodal_llm_model", "")
+            self.multimodal_llm_api_key = self.config.get("multimodal_llm_api_key", "")
+            
+             # 验证多模态LLM配置
+            if self.multimodal_llm_api_base and not self.multimodal_llm_api_key :
+                logger.error("[Summary] 多模态LLM API 密钥未在配置中找到")
+                raise Exception("多模态LLM API 密钥未配置")
+
+
             # 初始化数据库
             curdir = os.path.dirname(__file__)
             db_path = os.path.join(curdir, "chat.db")
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self._init_database()
+
+             # 初始化线程池
+            self.executor = ThreadPoolExecutor(max_workers=5) #你可以根据实际情况调整线程池大小
 
             # 注册事件处理器
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
@@ -131,6 +156,14 @@ class Summary(Plugin):
         return {
             'Authorization': f"Bearer {self.open_ai_api_key}",
             'Host': urlparse(self.open_ai_api_base).netloc,
+            'Content-Type': 'application/json'
+        }
+    
+    def _get_multimodal_llm_headers(self):
+        """获取多模态LLM API 请求头"""
+        return {
+            'Authorization': f"Bearer {self.multimodal_llm_api_key}",
+            'Host': urlparse(self.multimodal_llm_api_base).netloc,
             'Content-Type': 'application/json'
         }
 
@@ -192,6 +225,115 @@ class Summary(Plugin):
         except Exception as e:
             logger.error(f"[Summary] 总结生成失败: {e}")
             return f"总结失败：{str(e)}"
+    
+    def _multimodal_completion(self, api_key, image_path, text_prompt, model="GLM-4V-Flash", detail="low"):
+        """
+        调用多模态 API 进行图片理解和文本生成。
+
+        Args:
+            api_key (str): 你的 API 密钥。
+            image_path (str): 图片的本地路径。
+            text_prompt (str): 文本提示。
+            model (str, optional): 使用的模型. Defaults to "GLM-4V-Flash".
+            detail (str, optional): 图片细节级别 ("low" or "high"). Defaults to "low".
+
+        Returns:
+            str: API 返回的文本回复，如果请求失败则返回 None.
+        """
+
+        api_url = "https://api.72live.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Host": "api.72live.com"
+        }
+
+        try:
+            # 1. 读取图片并进行 base64 编码
+            with open(image_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            image_url_data = f"data:image/jpeg;base64,{encoded_string}"
+
+
+            # 2. 构建 JSON Payload
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_url_data,
+                                    "detail": detail
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": text_prompt
+                            }
+                        ]
+                    }
+                ]
+            }
+
+            # 3. 发送请求并处理响应
+            response = requests.post(api_url, headers=headers, json=payload)
+            response.raise_for_status()  # 检查 HTTP 错误
+
+            json_response = response.json()
+
+            # 4. 提取文本回复
+            if 'choices' in json_response and json_response['choices']:
+                return json_response['choices'][0]['message']['content']
+            else:
+                print(f"API 响应中没有找到文本回复: {json_response}")
+                return None
+
+
+        except requests.exceptions.RequestException as e:
+            print(f"请求 API 发生错误: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"JSON 解析错误: {e}")
+            return None
+        except FileNotFoundError as e:
+            print(f"图片文件找不到: {e}")
+            return None
+        except Exception as e:
+            print(f"发生未知错误: {e}")
+            return None
+
+
+    def _resize_and_encode_image(self, image_path):
+        """将图片调整大小并编码为 base64"""
+        try:
+            img = Image.open(image_path)
+            
+            # 将图片转换为 RGB 模式，去除 alpha 通道
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+
+            max_size = (2048, 2048)
+            img.thumbnail(max_size)
+
+            # 检查图片大小，如果超过 1M 就尝试降低质量
+            if os.path.getsize(image_path) > 1 * 1024 * 1024:
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG", quality=80)  # 降低质量
+                base64_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                if len(base64_str) * 3 / 4 / 1024 / 1024 > 1: #评估base64后的图片大小是否超过1M，是的话直接放弃
+                    return None
+                return base64_str
+            else:
+                buffer = BytesIO()
+                img.save(buffer, format="JPEG")
+                return base64.b64encode(buffer.getvalue()).decode('utf-8')
+        except Exception as e:
+            logger.error(f"[Summary] 图片处理失败: {e}")
+            return None
+
 
     def _insert_record(self, session_id, msg_id, user, content, msg_type, timestamp, is_triggered = 0):
         """将记录插入到数据库"""
@@ -238,8 +380,48 @@ class Summary(Plugin):
             if match_prefix is not None:
                 is_triggered = True
 
-        self._insert_record(session_id, cmsg.msg_id, username, context.content, str(context.type), cmsg.create_time, int(is_triggered))
+        self._insert_record(session_id, cmsg.msg_id, username, content, str(context.type), cmsg.create_time, int(is_triggered))
         logger.debug("[Summary] {}:{} ({})" .format(username, context.content, session_id))
+        
+        # 处理图片消息
+        if context.type == ContextType.IMAGE and self.multimodal_llm_api_base and self.multimodal_llm_model and self.multimodal_llm_api_key:
+            image_path = context.content  # 假设 context.content 是图片本地路径
+            self._process_image_async(session_id, cmsg.msg_id, username, image_path, cmsg.create_time)
+
+
+    def _process_image_async(self, session_id, msg_id, username, image_path, create_time):
+        """使用线程池异步处理图片消息"""
+        future = self.executor.submit(self._process_image, session_id, msg_id, username, image_path, create_time)
+        future.add_done_callback(self._handle_image_result)
+
+    def _process_image(self, session_id, msg_id, username, image_path, create_time):
+        """处理图片消息，调用多模态LLM API"""
+        try:
+            base64_image = self._resize_and_encode_image(image_path)
+            if not base64_image:
+                 return "图片处理失败：无法处理或图片太大"
+            
+            # 添加 text_prompt 参数
+            text_prompt = "尽可能简单简要描述这张图片的客观内容，不做评论，限制在100字以内，抓住整体和关键信息"
+            text_content = self._multimodal_completion(self.multimodal_llm_api_key, image_path, text_prompt, model=self.multimodal_llm_model)
+
+            if text_content and not text_content.startswith("图片转文字失败"):
+                # 将识别出的文本内容保存到数据库
+                self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
+                logger.info(f"[Summary] 成功将图片转为文字并保存：{text_content}")
+            return text_content
+        except Exception as e:
+           logger.error(f"[Summary] 异步图片处理失败: {e}")
+           return None
+
+    def _handle_image_result(self, future):
+        """处理异步图片处理的结果"""
+        try:
+            result = future.result()
+            if result and result.startswith("图片转文字失败"):
+                logger.error(f"[Summary] 异步图片处理失败：{result}")
+        except Exception as e:
+            logger.error(f"[Summary] 异步处理结果错误：{e}")
 
     def _check_tokens(self, records, max_tokens=None):  # 添加默认值
         """准备用于总结的聊天内容"""
