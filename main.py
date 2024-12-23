@@ -66,6 +66,8 @@ class Summary(Plugin):
     multimodal_llm_api_base = ""
     multimodal_llm_model = ""
     multimodal_llm_api_key = ""
+    multimodal_detail_level = "low"
+    multimodal_text_prompt = "尽可能简单简要描述这张图片的客观内容，不做评论，限制在100字以内，抓住整体和关键信息"
 
     def __init__(self):
         super().__init__()
@@ -112,6 +114,10 @@ class Summary(Plugin):
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
             self.handlers[Event.ON_RECEIVE_MESSAGE] = self.on_receive_message
             logger.info("[Summary] 初始化完成，配置: %s", self.config)
+
+            # 加载多模态配置
+            self.multimodal_detail_level = self.config.get("multimodal_detail_level", self.multimodal_detail_level)
+            self.multimodal_text_prompt = self.config.get("multimodal_text_prompt", self.multimodal_text_prompt)
         except Exception as e:
             logger.error(f"[Summary] 初始化失败: {e}")
             raise e
@@ -226,26 +232,18 @@ class Summary(Plugin):
             logger.error(f"[Summary] 总结生成失败: {e}")
             return f"总结失败：{str(e)}"
     
-    def _multimodal_completion(self, api_key, image_path, text_prompt, model="GLM-4V-Flash", detail="low"):
-        """
-        调用多模态 API 进行图片理解和文本生成。
+    def _multimodal_completion(self, api_key, image_path, text_prompt, model=None, detail=None):
+        if model is None:
+            model = self.multimodal_llm_model
+        if detail is None:
+            detail = self.multimodal_detail_level
 
-        Args:
-            api_key (str): 你的 API 密钥。
-            image_path (str): 图片的本地路径。
-            text_prompt (str): 文本提示。
-            model (str, optional): 使用的模型. Defaults to "GLM-4V-Flash".
-            detail (str, optional): 图片细节级别 ("low" or "high"). Defaults to "low".
-
-        Returns:
-            str: API 返回的文本回复，如果请求失败则返回 None.
-        """
-
-        api_url = "https://api.72live.com/v1/chat/completions"
+        # 使用配置中的 API URL 并添加完整路径
+        api_url = f"{self.multimodal_llm_api_base}/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "Host": "api.72live.com"
+            "Host": urlparse(api_url).netloc
         }
 
         try:
@@ -402,8 +400,13 @@ class Summary(Plugin):
                  return "图片处理失败：无法处理或图片太大"
             
             # 添加 text_prompt 参数
-            text_prompt = "尽可能简单简要描述这张图片的客观内容，不做评论，限制在100字以内，抓住整体和关键信息"
-            text_content = self._multimodal_completion(self.multimodal_llm_api_key, image_path, text_prompt, model=self.multimodal_llm_model)
+            text_prompt = self.multimodal_text_prompt
+            text_content = self._multimodal_completion(
+                self.multimodal_llm_api_key, 
+                image_path, 
+                text_prompt, 
+                model=self.multimodal_llm_model
+            )
 
             if text_content and not text_content.startswith("图片转文字失败"):
                 # 将识别出的文本内容保存到数据库
