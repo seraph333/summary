@@ -1,5 +1,4 @@
 # encoding:utf-8
-# 当前版本要对图片转文字生效，需要修改/app/channel/wechat/wechat_message.py的第32行self._prepare_fn = lambda: itchat_msg.download(self.content)加入一行self._prepare_fn()
 
 import asyncio
 import json
@@ -28,7 +27,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.1",
+    version="1.2",
     author="lanvent",
 )
 class Summary(Plugin):
@@ -37,7 +36,7 @@ class Summary(Plugin):
     open_ai_model = "gpt-4o-mini"
     summary_max_tokens = 2000
     input_max_tokens_limit = 8000  # 默认限制输入 8000 个 token
-    prompt = '''
+    default_summary_prompt = '''
 **核心规则：**
 1. **指令优先级：**
     *   **最高优先级：** 用户特定指令:{custom_prompt} **，如果涉及总结可以参考总结的规则，否则只遵循用户特定指令执行。
@@ -62,17 +61,17 @@ class Summary(Plugin):
 [x]是emoji表情或者是对图片和声音文件的说明，消息最后出现<T>表示消息触发了群聊机器人的回复，内容通常是提问，若带有特殊符号如#和$则是触发你无法感知的某个插件功能，聊天记录中不包含你对这类消息的回复，可降低这些消息的权重。请不要在回复中包含聊天记录格式中出现的符号。
 
 '''
-    #新增的多模态LLM配置
-    multimodal_llm_api_base = ""
-    multimodal_llm_model = ""
-    multimodal_llm_api_key = ""
-    multimodal_detail_level = "low"
-    multimodal_text_prompt = """
+    default_image_prompt = """
 尽可能简单简要描述这张图片的客观内容，抓住整体和关键信息，但不做概述，不做评论，限制在100字以内.
 如果是股票类截图，重点抓住主体股票名，关键的时间和当前价格，不关注其他细分价格和指数；
 如果是文字截图，只关注文字内容，不用描述图的颜色颜色等；
 如果图中有划线，画圈等，要注意这可能是表达的重点信息。
             """
+    #新增的多模态LLM配置
+    multimodal_llm_api_base = ""
+    multimodal_llm_model = ""
+    multimodal_llm_api_key = ""
+
     def __init__(self):
         super().__init__()
         try:
@@ -90,7 +89,10 @@ class Summary(Plugin):
             # 修改变量名
             self.summary_max_tokens = self.config.get("max_tokens", self.summary_max_tokens)
             self.input_max_tokens_limit = self.config.get("max_input_tokens", self.input_max_tokens_limit)
-            self.prompt = self.config.get("prompt", self.prompt)
+
+            #加载提示词，优先读取配置，否则用默认的
+            self.default_summary_prompt = self.config.get("default_summary_prompt", self.default_summary_prompt)
+            self.default_image_prompt = self.config.get("default_image_prompt", self.default_image_prompt)
             # 新增 chunk_max_tokens 从 config 加载，默认值是 3600
             self.chunk_max_tokens = self.config.get("max_tokens_persession", 3600)
 
@@ -118,10 +120,6 @@ class Summary(Plugin):
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
             self.handlers[Event.ON_RECEIVE_MESSAGE] = self.on_receive_message
             logger.info("[Summary] 初始化完成，配置: %s", self.config)
-
-            # 加载多模态配置
-            self.multimodal_detail_level = self.config.get("multimodal_detail_level", self.multimodal_detail_level)
-            self.multimodal_text_prompt = self.config.get("multimodal_text_prompt", self.multimodal_text_prompt)
         except Exception as e:
             logger.error(f"[Summary] 初始化失败: {e}")
             raise e
@@ -186,18 +184,23 @@ class Summary(Plugin):
             'max_tokens': self.summary_max_tokens #修改变量名
         }
 
-    def _chat_completion(self, content, custom_prompt=None):
+    def _chat_completion(self, content, custom_prompt=None, prompt_type="summary"):
         """
         调用 OpenAI 聊天补全 API
         
         :param content: 需要总结的聊天内容
         :param custom_prompt: 可选的自定义 prompt，用于替换默认 prompt
+        :param prompt_type:  定义使用哪一个类型的prompt，可选值 summary，image
         :return: 总结后的文本
         """
         try:
             # 使用默认 prompt
-            prompt_to_use = self.prompt
-
+            if prompt_type == "summary":
+              prompt_to_use = self.default_summary_prompt
+            elif prompt_type == "image":
+                prompt_to_use = self.default_image_prompt
+            else:
+                prompt_to_use = self.default_summary_prompt #默认选择 summary 类型
             # 使用 custom_prompt，如果 custom_prompt 为空，则替换为 "无"
             replacement_prompt = custom_prompt if custom_prompt else "无"
             prompt_to_use = prompt_to_use.replace("{custom_prompt}", replacement_prompt)
@@ -236,18 +239,26 @@ class Summary(Plugin):
             logger.error(f"[Summary] 总结生成失败: {e}")
             return f"总结失败：{str(e)}"
     
-    def _multimodal_completion(self, api_key, image_path, text_prompt, model=None, detail=None):
-        if model is None:
-            model = self.multimodal_llm_model
-        if detail is None:
-            detail = self.multimodal_detail_level
+    def _multimodal_completion(self, api_key, image_path, text_prompt, model="GLM-4V-Flash", detail="low"):
+        """
+        调用多模态 API 进行图片理解和文本生成。
 
-        # 使用配置中的 API URL 并添加完整路径
-        api_url = f"{self.multimodal_llm_api_base}/chat/completions"
+        Args:
+            api_key (str): 你的 API 密钥。
+            image_path (str): 图片的本地路径。
+            text_prompt (str): 文本提示。
+            model (str, optional): 使用的模型. Defaults to "GLM-4V-Flash".
+            detail (str, optional): 图片细节级别 ("low" or "high"). Defaults to "low".
+
+        Returns:
+            str: API 返回的文本回复，如果请求失败则返回 None.
+        """
+
+        api_url = "https://api.72live.com/v1/chat/completions"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "Host": urlparse(api_url).netloc
+            "Host": "api.72live.com"
         }
 
         try:
@@ -326,7 +337,7 @@ class Summary(Plugin):
                 img.save(buffer, format="JPEG", quality=80)  # 降低质量
                 base64_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
                 if len(base64_str) * 3 / 4 / 1024 / 1024 > 1: #评估base64后的图片大小是否超过1M，是的话直接放弃
-                    return None
+                   return None
                 return base64_str
             else:
                 buffer = BytesIO()
@@ -335,7 +346,6 @@ class Summary(Plugin):
         except Exception as e:
             logger.error(f"[Summary] 图片处理失败: {e}")
             return None
-
 
     def _insert_record(self, session_id, msg_id, user, content, msg_type, timestamp, is_triggered = 0):
         """将记录插入到数据库"""
@@ -404,21 +414,15 @@ class Summary(Plugin):
                  return "图片处理失败：无法处理或图片太大"
             
             # 添加 text_prompt 参数
-            text_prompt = self.multimodal_text_prompt
-            text_content = self._multimodal_completion(
-                self.multimodal_llm_api_key, 
-                image_path, 
-                text_prompt, 
-                model=self.multimodal_llm_model
-            )
+            
+            text_content = self._multimodal_completion(self.multimodal_llm_api_key, image_path, self.default_image_prompt, model=self.multimodal_llm_model)
 
             if text_content and not text_content.startswith("图片转文字失败"):
                 # 将识别出的文本内容保存到数据库
                 self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
                 logger.info(f"[Summary] 成功将图片转为文字并保存：{text_content}")
-            return text_content
 
-             # 删除临时文件 (确保文件存在且不是原始文件)
+            # 删除临时文件 (确保文件存在且不是原始文件)
             if os.path.exists(image_path) and self.config.get('delete_temp_image',True):
                   try:
                         os.remove(image_path)
@@ -487,8 +491,7 @@ class Summary(Plugin):
                 break
 
             try:
-                content = f"{self.prompt.replace('{custom_prompt}', custom_prompt)}\n\n需要你总结的聊天记录如下：{query}"
-                result = self._chat_completion(content, custom_prompt)
+                result = self._chat_completion(query, custom_prompt, prompt_type="summary")
                 summarys.append(result)
                 count += 1
             except Exception as e:
