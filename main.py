@@ -397,6 +397,7 @@ class Summary(Plugin):
         
         # 处理图片消息
         if context.type == ContextType.IMAGE and self.multimodal_llm_api_base and self.multimodal_llm_model and self.multimodal_llm_api_key:
+            context.get("msg").prepare()
             image_path = context.content  # 假设 context.content 是图片本地路径
             self._process_image_async(session_id, cmsg.msg_id, username, image_path, cmsg.create_time)
 
