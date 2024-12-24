@@ -422,15 +422,6 @@ class Summary(Plugin):
                 # 将识别出的文本内容保存到数据库
                 self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
                 logger.info(f"[Summary] 成功将图片转为文字并保存：{text_content}")
-
-            # 删除临时文件 (确保文件存在且不是原始文件)
-            if os.path.exists(image_path) and self.config.get('delete_temp_image',True):
-                  try:
-                        os.remove(image_path)
-                        logger.debug(f"[Summary] 成功删除临时图片文件：{image_path}")
-                  except Exception as e:
-                         logger.error(f"[Summary] 删除临时图片文件失败: {e}")
-            return text_content
         except Exception as e:
            logger.error(f"[Summary] 异步图片处理失败: {e}")
            return None
