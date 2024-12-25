@@ -239,29 +239,16 @@ class Summary(Plugin):
             logger.error(f"[Summary] 总结生成失败: {e}")
             return f"总结失败：{str(e)}"
     
-    def _multimodal_completion(self, api_key, image_path, text_prompt, model=None, detail="low"):
-        """调用多模态 API 进行图片理解和文本生成
-
-        Args:
-            api_key (str): 你的 API 密钥。
-            image_path (str): 图片的本地路径。
-            text_prompt (str): 文本提示。
-            model (str, optional): 使用的模型. Defaults to "GLM-4V-Flash".
-            detail (str, optional): 图片细节级别 ("low" or "high"). Defaults to "low".
-
-        Returns:
-            str: API 返回的文本回复，如果请求失败则返回 None.
+    def _multimodal_completion(self, api_key, image_path, text_prompt, model="GLM-4V-Flash", detail="low"):
         """
-        # 使用配置的值或传入的参数
-        model = model or self.multimodal_llm_model
-        
-        # 使用配置中的 api_base 构建完整的 URL
-        api_url = f"{self.multimodal_llm_api_base}/chat/completions"
+        调用多模态 API 进行图片理解和文本生成。
+        """
 
+        api_url = f"{self.multimodal_llm_api_base}/chat/completions" # 从配置项读取并拼接 URL
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "Host": urlparse(self.multimodal_llm_api_base).netloc
+            "Host": urlparse(self.multimodal_llm_api_base).netloc # 从配置项读取，并解析host
         }
 
         try:
@@ -415,28 +402,45 @@ class Summary(Plugin):
         try:
             base64_image = self._resize_and_encode_image(image_path)
             if not base64_image:
-                 return "图片处理失败：无法处理或图片太大"
-            
-            # 添加 text_prompt 参数
-            
+                    error_msg = "图片处理失败：无法处理或图片太大"
+                    logger.error(f"[Summary] {error_msg}")
+                    return error_msg #返回错误信息
+
             text_content = self._multimodal_completion(self.multimodal_llm_api_key, image_path, self.default_image_prompt, model=self.multimodal_llm_model)
 
-            if text_content and not text_content.startswith("图片转文字失败"):
-                # 将识别出的文本内容保存到数据库
-                self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
-                logger.info(f"[Summary] 成功将图片转为文字并保存：{text_content}")
+            if text_content is None:
+                    error_msg = "识图失败：多模态LLM API返回为空"
+                    logger.error(f"[Summary] {error_msg}")
+                    return error_msg #返回错误信息
+            elif text_content.startswith("图片转文字失败"):
+                    error_msg = f"识图失败：{text_content}"
+                    logger.error(f"[Summary] {error_msg}")
+                    return error_msg #返回错误信息
+            else:
+                    # 将识别出的文本内容保存到数据库
+                    self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
+                    return True # 返回 True 表示成功
         except Exception as e:
-           logger.error(f"[Summary] 异步图片处理失败: {e}")
-           return None
+            error_msg = f"识图失败：未知错误 {str(e)}"
+            logger.error(f"[Summary] {error_msg}")
+            return error_msg #返回错误信息
 
     def _handle_image_result(self, future):
-        """处理异步图片处理的结果"""
         try:
             result = future.result()
-            if result and result.startswith("图片转文字失败"):
+            if result is None:  # 检查 result 是否为 None
+                logger.error("[Summary] 异步图片处理结果为空")
+                print("[Summary] 异步图片处理结果为空")  # 添加打印到控制台的逻辑
+                return # 处理返回None的情况
+            elif isinstance(result, str) and (result.startswith("识图失败") or result.startswith("图片处理失败")):  # 确保返回的是字符串
                 logger.error(f"[Summary] 异步图片处理失败：{result}")
+                print(f"[Summary] 异步图片处理失败：{result}")  # 添加打印到控制台的逻辑
+            elif result is True:
+                logger.info("[Summary] 异步图片处理成功")
+                print("[Summary] 异步图片处理成功")
         except Exception as e:
             logger.error(f"[Summary] 异步处理结果错误：{e}")
+            print(f"[Summary] 异步处理结果错误：{e}")  # 添加打印到控制台的逻辑
 
     def _check_tokens(self, records, max_tokens=None):  # 添加默认值
         """准备用于总结的聊天内容"""
