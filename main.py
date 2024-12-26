@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import base64
 from io import BytesIO
 from PIL import Image
+import shutil
 
 import plugins
 from bridge.context import ContextType
@@ -115,6 +116,8 @@ class Summary(Plugin):
 
              # 初始化线程池
             self.executor = ThreadPoolExecutor(max_workers=5) #你可以根据实际情况调整线程池大小
+            self.pending_tasks = 0
+            self.max_pending_tasks = 20  # 最大等待任务数
 
             # 注册事件处理器
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
@@ -394,17 +397,41 @@ class Summary(Plugin):
 
     def _process_image_async(self, session_id, msg_id, username, image_path, create_time):
         """使用线程池异步处理图片消息"""
+        if self.pending_tasks >= self.max_pending_tasks:
+            logger.warning("[Summary] 图片处理队列已满，丢弃请求")
+            return
+        
+        self.pending_tasks += 1
         future = self.executor.submit(self._process_image, session_id, msg_id, username, image_path, create_time)
         future.add_done_callback(self._handle_image_result)
+        future.add_done_callback(lambda x: setattr(self, 'pending_tasks', self.pending_tasks - 1))
 
     def _process_image(self, session_id, msg_id, username, image_path, create_time):
         """处理图片消息，调用多模态LLM API"""
         try:
-            base64_image = self._resize_and_encode_image(image_path)
+            # 确保图片文件存在
+            if not os.path.exists(image_path):
+                error_msg = "图片处理失败：文件不存在"
+                logger.error(f"[Summary] {error_msg}")
+                return error_msg
+
+            # 复制图片到临时文件以避免并发访问问题
+            temp_image_path = f"{image_path}.{time.time()}.tmp"
+            try:
+                shutil.copy2(image_path, temp_image_path)
+                base64_image = self._resize_and_encode_image(temp_image_path)
+            finally:
+                # 清理临时文件
+                if os.path.exists(temp_image_path):
+                    try:
+                        os.remove(temp_image_path)
+                    except Exception as e:
+                        logger.warning(f"[Summary] 清理临时文件失败: {e}")
+
             if not base64_image:
-                    error_msg = "图片处理失败：无法处理或图片太大"
-                    logger.error(f"[Summary] {error_msg}")
-                    return error_msg #返回错误信息
+                error_msg = "图片处理失败：无法处理或图片太大"
+                logger.error(f"[Summary] {error_msg}")
+                return error_msg
 
             text_content = self._multimodal_completion(self.multimodal_llm_api_key, image_path, self.default_image_prompt, model=self.multimodal_llm_model)
 
@@ -417,8 +444,10 @@ class Summary(Plugin):
                     logger.error(f"[Summary] {error_msg}")
                     return error_msg #返回错误信息
             else:
-                    # 将识别出的文本内容保存到数据库
-                    self._insert_record(session_id, msg_id, username, f"[图片描述]{text_content}", str(ContextType.TEXT), create_time, 0) # 这里默认识别内容没有触发
+                    # 将识别出的文本内容保存到数据库，并记录日志
+                    content = f"[图片描述]{text_content}"
+                    self._insert_record(session_id, msg_id, username, content, str(ContextType.TEXT), create_time, 0)
+                    logger.info(f"[Summary] 图片识别成功并保存到数据库 - 会话ID: {session_id}, 用户: {username}, 内容: {content}")
                     return True # 返回 True 表示成功
         except Exception as e:
             error_msg = f"识图失败：未知错误 {str(e)}"
