@@ -92,8 +92,13 @@ class Summary(Plugin):
             self.input_max_tokens_limit = self.config.get("max_input_tokens", self.input_max_tokens_limit)
 
             #加载提示词，优先读取配置，否则用默认的
-            self.default_summary_prompt = self.config.get("default_summary_prompt", self.default_summary_prompt)
-            self.default_image_prompt = self.config.get("default_image_prompt", self.default_image_prompt)
+            # 确保空字符串时使用默认值
+            config_summary_prompt = self.config.get("default_summary_prompt")
+            self.default_summary_prompt = config_summary_prompt if config_summary_prompt else self.default_summary_prompt
+            
+            config_image_prompt = self.config.get("default_image_prompt")
+            self.default_image_prompt = config_image_prompt if config_image_prompt else self.default_image_prompt
+
             # 新增 chunk_max_tokens 从 config 加载，默认值是 3600
             self.chunk_max_tokens = self.config.get("max_tokens_persession", 3600)
 
@@ -288,29 +293,39 @@ class Summary(Plugin):
             response = requests.post(api_url, headers=headers, json=payload)
             response.raise_for_status()  # 检查 HTTP 错误
 
+            # 添加详细的错误日志
+            if response.status_code != 200:
+                logger.error(f"[Summary] API 请求失败: 状态码 {response.status_code}")
+                logger.error(f"[Summary] 响应内容: {response.text}")
+                return None
+
             json_response = response.json()
+            logger.debug(f"[Summary] API 响应: {json_response}")  # 添加调试日志
 
             # 4. 提取文本回复
             if 'choices' in json_response and json_response['choices']:
                 return json_response['choices'][0]['message']['content']
             else:
-                print(f"API 响应中没有找到文本回复: {json_response}")
+                logger.error(f"[Summary] API 响应中没有找到文本回复: {json_response}")
                 return None
 
-
         except requests.exceptions.RequestException as e:
-            print(f"请求 API 发生错误: {e}")
+            logger.error(f"[Summary] 请求 API 发生错误: {e}")
+            logger.error(f"[Summary] 请求 URL: {api_url}")
+            logger.error(f"[Summary] 请求头: {headers}")
+            logger.error(f"[Summary] 请求体: {payload}")
             return None
         except json.JSONDecodeError as e:
-            print(f"JSON 解析错误: {e}")
+            logger.error(f"[Summary] JSON 解析错误: {e}")
+            logger.error(f"[Summary] 响应内容: {response.text}")
             return None
         except FileNotFoundError as e:
-            print(f"图片文件找不到: {e}")
+            logger.error(f"[Summary] 图片文件找不到: {e}")
             return None
         except Exception as e:
-            print(f"发生未知错误: {e}")
+            logger.error(f"[Summary] 发生未知错误: {e}")
+            logger.error(f"[Summary] 错误类型: {type(e)}")
             return None
-
 
     def _resize_and_encode_image(self, image_path):
         """将图片调整大小并编码为 base64"""
@@ -357,6 +372,13 @@ class Summary(Plugin):
         """处理接收到的消息"""
         context = e_context['context']
         cmsg : ChatMessage = e_context['context']['msg']
+        
+        # 检查消息内容是否需要过滤
+        content = context.content
+        if (('#' in content or '$' in content) and len(content) < 50):
+            logger.debug(f"[Summary] 消息被过滤: {content}")
+            return
+        
         username = None
         session_id = cmsg.from_user_id
         if self.config.get('channel_type', 'wx') == 'wx' and cmsg.from_user_nickname is not None:
@@ -554,10 +576,10 @@ class Summary(Plugin):
         """
         解析总结命令，支持以下格式：
         $总结 100                   # 最近100条消息
-        $总结 -7200 100             # 过去2小时内的消息，最多100条
-        $总结 -86400                # 过去24小时内的消息
+        $总结 -2h 100              # 过去2小时内的消息，最多100条
+        $总结 -24h                 # 过去24小时内的消息
         $总结 100 自定义指令         # 最近100条消息，使用自定义指令
-        $总结 -7200 100 自定义指令   # 过去2小时内的消息，最多100条，使用自定义指令
+        $总结 -2h 100 自定义指令    # 过去2小时内的消息，最多100条，使用自定义指令
         """
         current_time = int(time.time())
         custom_prompt = ""  # 初始化为空字符串
@@ -566,8 +588,15 @@ class Summary(Plugin):
 
         # 处理时间戳和消息数量
         for part in command_parts:
-            if part.startswith('-') and part[1:].isdigit():
-                # 负数时间戳：表示从过去多少秒开始
+            if part.startswith('-') and part.endswith('h'):
+                # 处理小时格式：-2h, -24h 等
+                try:
+                    hours = int(part[1:-1])  # 去掉'-'和'h'后转换为数字
+                    start_timestamp = current_time - (hours * 3600)  # 转换为秒
+                except ValueError:
+                    continue
+            elif part.startswith('-') and part[1:].isdigit():
+                # 保持向下兼容，支持原有的秒数格式
                 start_timestamp = current_time + int(part)
             elif part.isdigit():
                 # 如果是正整数，判断是消息数量还是时间戳
