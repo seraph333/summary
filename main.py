@@ -575,41 +575,52 @@ class Summary(Plugin):
     def _parse_summary_command(self, command_parts):
         """
         解析总结命令，支持以下格式：
-        $总结 100                   # 最近100条消息
-        $总结 -2h 100              # 过去2小时内的消息，最多100条
-        $总结 -24h                 # 过去24小时内的消息
-        $总结 100 自定义指令         # 最近100条消息，使用自定义指令
-        $总结 -2h 100 自定义指令    # 过去2小时内的消息，最多100条，使用自定义指令
+        $总结 100                      # 最近100条消息
+        $总结 -2h 100                 # 过去2小时内的消息，最多100条
+        $总结 -24h                    # 过去24小时内的消息
+        $总结 100 自定义指令            # 最近100条消息，使用自定义指令
+        $总结 -2h 100 自定义指令       # 过去2小时内的消息，最多100条，使用自定义指令
+        $总结 @群名称 密码 100          # 指定群的最近100条消息（需要密码验证）
+        $总结 @用户名 密码 -2h          # 指定用户过去2小时的消息（需要密码验证）
         """
         current_time = int(time.time())
-        custom_prompt = ""  # 初始化为空字符串
+        custom_prompt = ""
         start_timestamp = 0
-        limit = 9999  # 默认最大消息数
+        limit = 9999
+        target_session = None
+        password = None  # 新增：密码字段
 
-        # 处理时间戳和消息数量
-        for part in command_parts:
-            if part.startswith('-') and part.endswith('h'):
-                # 处理小时格式：-2h, -24h 等
+        # 处理命令参数
+        i = 0
+        while i < len(command_parts):
+            part = command_parts[i]
+            if part.startswith('@'):
+                target_session = part[1:]  # 去掉@符号
+                # 检查下一个参数是否为密码
+                if i + 1 < len(command_parts):
+                    password = command_parts[i + 1]
+                    i += 1  # 跳过密码参数
+            elif part.startswith('-') and part.endswith('h'):
                 try:
-                    hours = int(part[1:-1])  # 去掉'-'和'h'后转换为数字
-                    start_timestamp = current_time - (hours * 3600)  # 转换为秒
+                    hours = int(part[1:-1])
+                    start_timestamp = current_time - (hours * 3600)
                 except ValueError:
-                    continue
+                    pass
             elif part.startswith('-') and part[1:].isdigit():
-                # 保持向下兼容，支持原有的秒数格式
                 start_timestamp = current_time + int(part)
             elif part.isdigit():
-                # 如果是正整数，判断是消息数量还是时间戳
-                if int(part) > 1000:  # 假设大于1000的数字被视为时间戳
+                if int(part) > 1000:
                     start_timestamp = int(part)
                 else:
                     limit = int(part)
             else:
-                # 非数字部分被视为自定义指令
-                custom_prompt += part + " "
+                # 如果不是密码参数，则添加到自定义提示中
+                if not (target_session and password == part):
+                    custom_prompt += part + " "
+            i += 1
 
         custom_prompt = custom_prompt.strip()
-        return start_timestamp, limit, custom_prompt
+        return start_timestamp, limit, custom_prompt, target_session, password
 
     def on_handle_context(self, e_context: EventContext):
         """处理上下文，进行总结"""
@@ -620,17 +631,42 @@ class Summary(Plugin):
         if clist[0].startswith(trigger_prefix):
             
             # 解析命令
-            start_time, limit, custom_prompt = self._parse_summary_command(clist[1:])
+            start_time, limit, custom_prompt, target_session, password = self._parse_summary_command(clist[1:])
 
+            # 如果指定了目标会话，先检查是否在群聊中
+            if target_session:
+                if e_context['context'].get("isgroup", False):
+                    reply = Reply(ReplyType.ERROR, "指定会话总结功能仅支持私聊使用")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                
+                # 验证密码
+                config_password = self.config.get('summary_password', '')
+                if not config_password:
+                    reply = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法使用指定会话功能")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                if not password or password != config_password:
+                    reply = Reply(ReplyType.ERROR, "访问密码错误")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
 
             msg:ChatMessage = e_context['context']['msg']
             session_id = msg.from_user_id
             if self.config.get('channel_type', 'wx') == 'wx' and msg.from_user_nickname is not None:
                 session_id = msg.from_user_nickname
+
+            # 使用目标会话ID
+            if target_session:
+                session_id = target_session
+
             records = self._get_records(session_id, start_time, limit)
             
             if not records:
-                reply = Reply(ReplyType.ERROR, "没有找到聊天记录")
+                reply = Reply(ReplyType.ERROR, f"没有找到{'指定会话的' if target_session else ''}聊天记录")
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
                 return
@@ -652,5 +688,15 @@ class Summary(Plugin):
         if not verbose:
             return help_text
         trigger_prefix = self.config.get('plugin_trigger_prefix', "$")
-        help_text += f"使用方法:输入\"{trigger_prefix}总结 最近消息数量\"，我会帮助你总结聊天记录。\n例如：\"{trigger_prefix}总结 100\"，我会总结最近100条消息。\n\n你也可以直接输入\"{trigger_prefix}总结前99条信息\"或\"{trigger_prefix}总结3小时内的最近10条消息\"\n我会尽可能理解你的指令。"
+        help_text += f"""使用方法:
+1. 总结当前会话:
+   - {trigger_prefix}总结 100 (总结最近100条消息)
+   - {trigger_prefix}总结 -2h (总结最近2小时消息)
+   - {trigger_prefix}总结 -24h 100 (总结24小时内最近100条消息)
+
+2. 总结指定会话(需要密码):
+   - {trigger_prefix}总结 @群名称 密码 100 (总结指定群最近100条消息)
+   - {trigger_prefix}总结 @用户名 密码 -2h (总结指定用户最近2小时消息)
+
+你也可以添加自定义指令，如：{trigger_prefix}总结 @群名称 密码 100 帮我找出重要的会议内容"""
         return help_text

@@ -11,5 +11,6 @@
     "default_image_prompt": "尽可能简单简要描述这张图片的客观内容，抓住整体和关键信息，但不做概述，不做评论，限制在100字以内.\n如果是股票类截图，重点抓住主体股票名，关键的时间和当前价格，不关注其他细分价格和指数；\n如果是文字截图，只关注文字内容，不用描述图的颜色颜色等；\n如果图中有划线，画圈等，要注意这可能是表达的重点信息。",
     "summary_max_tokens": 8000,
     "input_max_tokens_limit": 160000,
-    "chunk_max_tokens": 16000
+    "chunk_max_tokens": 16000,
+    "summary_password": ""
 }
