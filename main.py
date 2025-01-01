@@ -28,7 +28,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.2",
+    version="1.4",
     author="lanvent",
 )
 class Summary(Plugin):
@@ -77,52 +77,39 @@ class Summary(Plugin):
         super().__init__()
         try:
             self.config = self._load_config()
-            # 加载配置，使用默认值
-            self.open_ai_api_base = self.config.get("open_ai_api_base", self.open_ai_api_base)
-            self.open_ai_api_key = self.config.get("open_ai_api_key", "")
             
-            # 验证 API 密钥
-            if not self.open_ai_api_key:
-                logger.error("[Summary] OpenAI API 密钥未在配置中找到")
-                raise Exception("OpenAI API 密钥未配置")
-                
-            self.open_ai_model = self.config.get("open_ai_model", self.open_ai_model)
-            # 修改变量名
-            self.summary_max_tokens = self.config.get("max_tokens", self.summary_max_tokens)
-            self.input_max_tokens_limit = self.config.get("max_input_tokens", self.input_max_tokens_limit)
+            #加载多模态LLM配置
+            self.multimodal_llm_api_base = self.config.get("multimodal_llm_api_base", "")
+            self.multimodal_llm_model = self.config.get("multimodal_llm_model", "")
+            self.multimodal_llm_api_key = self.config.get("multimodal_llm_api_key", "")
+            
+            # 验证多模态LLM配置
+            if self.multimodal_llm_api_base and not self.multimodal_llm_api_key:
+                logger.error("[Summary] 多模态LLM API 密钥未在配置中找到")
+                raise Exception("多模态LLM API 密钥未配置")
 
-            #加载提示词，优先读取配置，否则用默认的
-            # 确保空字符串时使用默认值
+            # 加载提示词，优先读取配置，否则用默认的
             config_summary_prompt = self.config.get("default_summary_prompt")
             self.default_summary_prompt = config_summary_prompt if config_summary_prompt else self.default_summary_prompt
             
             config_image_prompt = self.config.get("default_image_prompt")
             self.default_image_prompt = config_image_prompt if config_image_prompt else self.default_image_prompt
 
-            # 新增 chunk_max_tokens 从 config 加载，默认值是 3600
-            self.chunk_max_tokens = self.config.get("max_tokens_persession", 3600)
-
-            #加载多模态LLM配置
-            self.multimodal_llm_api_base = self.config.get("multimodal_llm_api_base", "")
-            self.multimodal_llm_model = self.config.get("multimodal_llm_model", "")
-            self.multimodal_llm_api_key = self.config.get("multimodal_llm_api_key", "")
+            # 加载其他配置
+            self.summary_max_tokens = self.config.get("summary_max_tokens", 8000)
+            self.input_max_tokens_limit = self.config.get("input_max_tokens_limit", 160000)
+            self.chunk_max_tokens = self.config.get("chunk_max_tokens", 16000)
             
-             # 验证多模态LLM配置
-            if self.multimodal_llm_api_base and not self.multimodal_llm_api_key :
-                logger.error("[Summary] 多模态LLM API 密钥未在配置中找到")
-                raise Exception("多模态LLM API 密钥未配置")
-
-
             # 初始化数据库
             curdir = os.path.dirname(__file__)
             db_path = os.path.join(curdir, "chat.db")
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self._init_database()
 
-             # 初始化线程池
-            self.executor = ThreadPoolExecutor(max_workers=5) #你可以根据实际情况调整线程池大小
+            # 初始化线程池
+            self.executor = ThreadPoolExecutor(max_workers=5)
             self.pending_tasks = 0
-            self.max_pending_tasks = 20  # 最大等待任务数
+            self.max_pending_tasks = 20
 
             # 注册事件处理器
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
@@ -192,61 +179,45 @@ class Summary(Plugin):
             'max_tokens': self.summary_max_tokens #修改变量名
         }
 
-    def _chat_completion(self, content, custom_prompt=None, prompt_type="summary"):
+    def _chat_completion(self, content, e_context, custom_prompt=None, prompt_type="summary"):
         """
-        调用 OpenAI 聊天补全 API
+        准备总结提示词并传递给下一个插件处理
         
         :param content: 需要总结的聊天内容
-        :param custom_prompt: 可选的自定义 prompt，用于替换默认 prompt
-        :param prompt_type:  定义使用哪一个类型的prompt，可选值 summary，image
-        :return: 总结后的文本
+        :param e_context: 事件上下文
+        :param custom_prompt: 可选的自定义 prompt
+        :param prompt_type: 定义使用哪一个类型的prompt，可选值 summary，image
+        :return: None，由下一个插件处理
         """
         try:
             # 使用默认 prompt
             if prompt_type == "summary":
-              prompt_to_use = self.default_summary_prompt
+                prompt_to_use = self.default_summary_prompt
             elif prompt_type == "image":
                 prompt_to_use = self.default_image_prompt
             else:
-                prompt_to_use = self.default_summary_prompt #默认选择 summary 类型
+                prompt_to_use = self.default_summary_prompt  # 默认选择 summary 类型
+
             # 使用 custom_prompt，如果 custom_prompt 为空，则替换为 "无"
             replacement_prompt = custom_prompt if custom_prompt else "无"
             prompt_to_use = prompt_to_use.replace("{custom_prompt}", replacement_prompt)
-
             
-            # 增加日志：打印完整提示词
-            logger.info(f"[Summary] 完整提示词: {prompt_to_use}")
+            # 构造完整的提示词
+            full_prompt = f"{prompt_to_use}\n\n'''{content}'''"
             
-            # 准备完整的载荷
-            payload = {
-                "model": self.open_ai_model,
-                "messages": [
-                    {"role": "system", "content": prompt_to_use},
-                    {"role": "user", "content": content}
-                ],
-                "max_tokens": self.summary_max_tokens #修改变量名
-            }
+            # 修改 context 内容，传递给下一个插件处理
+            e_context['context'].type = ContextType.TEXT
+            e_context['context'].content = full_prompt
             
-            # 获取 OpenAI API URL 和请求头
-            url = self._get_openai_chat_url()
-            headers = self._get_openai_headers()
+            # 继续传递给下一个插件处理
+            e_context.action = EventAction.CONTINUE
+            logger.debug(f"[Summary] 传递内容给下一个插件处理: length={len(full_prompt)}")
+            return
             
-            # 发送 API 请求
-            response = requests.post(url, headers=headers, json=payload)
-            
-            # 检查并处理响应
-            if response.status_code == 200:
-                result = response.json()
-                summary = result['choices'][0]['message']['content'].strip()
-                return summary
-            else:
-                logger.error(f"[Summary] OpenAI API 错误: {response.text}")
-                return f"总结失败：{response.text}"
-        
         except Exception as e:
             logger.error(f"[Summary] 总结生成失败: {e}")
             return f"总结失败：{str(e)}"
-    
+
     def _multimodal_completion(self, api_key, image_path, text_prompt, model="GLM-4V-Flash", detail="low"):
         """
         调用多模态 API 进行图片理解和文本生成。
@@ -671,17 +642,20 @@ class Summary(Plugin):
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            summarys = self._split_messages_to_summarys(records, custom_prompt)
-            if not summarys:
-                reply = Reply(ReplyType.ERROR, "总结失败")
+            # 准备聊天记录内容
+            query = self._check_tokens(records)
+            if not query:
+                reply = Reply(ReplyType.ERROR, "聊天记录为空")
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
                 return
+
+            # 发送处理中的提示
+            processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
+            e_context["channel"].send(processing_reply, e_context["context"])
             
-            result = "\n\n".join(summarys)
-            reply = Reply(ReplyType.TEXT, result)
-            e_context["reply"] = reply
-            e_context.action = EventAction.BREAK_PASS
+            # 调用总结功能并传递给下一个插件
+            return self._chat_completion(query, e_context, custom_prompt, "summary")
 
     def get_help_text(self, verbose = False, **kwargs):
         help_text = "聊天记录总结插件。\n"

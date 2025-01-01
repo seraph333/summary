@@ -46,19 +46,22 @@ $总结 [参数]
 
 ```json
 {
-    "open_ai_api_base": "https://api.openai.com/v1",
-    "open_ai_api_key": "你的OpenAI API密钥",
-    "open_ai_model": "gpt-4",
-    "max_tokens": 2000,
-    "max_input_tokens": 8000,
-    "max_tokens_persession": 3600,
-    "summary_password": "设置访问密码",
-    
     "multimodal_llm_api_base": "多模态LLM API地址",
     "multimodal_llm_model": "多模态LLM模型名称",
-    "multimodal_llm_api_key": "多模态LLM API密钥"
+    "multimodal_llm_api_key": "多模态LLM API密钥",
+    "summary_password": "设置访问密码",
+    "summary_max_tokens": 8000,
+    "input_max_tokens_limit": 160000,
+    "chunk_max_tokens": 16000
 }
 ```
+
+配置项说明：
+- `multimodal_llm_*`: 多模态LLM相关配置，用于图片识别功能
+- `summary_password`: 指定会话总结功能的访问密码
+- `summary_max_tokens`: 总结内容的最大token数
+- `input_max_tokens_limit`: 输入内容的最大token数限制
+- `chunk_max_tokens`: 每个处理块的最大token数
 
 ## 输出格式
 
@@ -84,16 +87,15 @@ $总结 [参数]
 
 ## 更新日志
 
+### v1.4
+- 移除直接调用 OpenAI API 进行总结的功能
+- 改为通过 bot 处理总结请求
+- 优化总结处理流程，添加处理中提示
+
 ### v1.3
 - 新增指定群聊/用户名总结功能
 - 添加密码验证机制
-- 优化命令解析逻辑
-
-### v1.2
-- 支持小时单位的时间范围指定
-- 优化图片处理机制
-- 增强错误处理和日志记录
-- 改进提示词配置加载逻辑
+- 限制指定会话总结功能仅支持私聊使用
 
 ## 许可证
 
