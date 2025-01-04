@@ -413,7 +413,6 @@ class Summary(Plugin):
                     
                     if group_name:
                         self.group_name_cache[group_id] = group_name
-                        logger.info(f"[Summary] 成功获取群名称: {group_id} -> {group_name}")
                         return group_name
                     else:
                         logger.warning(f"[Summary] API返回的群名为空 - Group ID: {group_id}")
@@ -441,6 +440,10 @@ class Summary(Plugin):
             # 群聊：使用群名作为session_id，用户昵称作为username
             session_id = self._get_group_name(cmsg.from_user_id)
             username = cmsg.actual_user_nickname or self._get_user_nickname(cmsg.actual_user_id)
+            
+            # 只有当content以用户ID开头且后面紧跟冒号时才清理
+            if content.startswith(f"{cmsg.actual_user_id}:"):
+                content = content[len(cmsg.actual_user_id) + 1:].strip()
         else:
             # 单聊：使用用户昵称作为session_id和username
             nickname = self._get_user_nickname(cmsg.from_user_id)
@@ -448,7 +451,6 @@ class Summary(Plugin):
             username = nickname
 
         is_triggered = False
-        content = context.content
         if context.get("isgroup", False):
             match_prefix = check_prefix(content, self.config.get('group_chat_prefix'))
             match_contain = check_contain(content, self.config.get('group_chat_keyword'))
@@ -462,7 +464,7 @@ class Summary(Plugin):
                 is_triggered = True
 
         self._insert_record(session_id, cmsg.msg_id, username, content, str(context.type), cmsg.create_time, int(is_triggered))
-        logger.debug("[Summary] {}:{} ({})" .format(username, context.content, session_id))
+        logger.debug("[Summary] {}:{} ({})" .format(username, content, session_id))
         
         # 处理图片消息
         if context.type == ContextType.IMAGE and self.multimodal_llm_api_base and self.multimodal_llm_model and self.multimodal_llm_api_key:
@@ -678,67 +680,107 @@ class Summary(Plugin):
 
     def on_handle_context(self, e_context: EventContext):
         """处理上下文，进行总结"""
-        content = e_context['context'].content
+        context = e_context['context']
+        content = context.content
+        msg = context['msg']
         logger.debug("[Summary] on_handle_context. content: %s" % content)
+        
+        # 检查是否是文本消息
+        if context.type != ContextType.TEXT:
+            return
+        
+        # 清理消息内容中的用户ID前缀
+        if context.get("isgroup", False) and content.startswith(f"{msg.actual_user_id}:"):
+            content = content[len(msg.actual_user_id) + 1:].strip()
+        
+        # 获取触发前缀
         trigger_prefix = self.config.get('plugin_trigger_prefix', "$")
         clist = content.split()
+        
+        # 检查是否包含触发命令
+        is_trigger = False
         if clist[0].startswith(trigger_prefix):
-            
-            # 解析命令
-            start_time, limit, custom_prompt, target_session, password = self._parse_summary_command(clist[1:])
+            # 使用$前缀触发
+            is_trigger = True
+        else:
+            # 检查是否是"总结"命令
+            # 1. 消息以"总结"开头
+            # 2. 消息为"@xxx 总结"格式
+            # 3. 消息为"总结 xxx"格式
+            content_stripped = content.strip()
+            if content_stripped.startswith("总结") or \
+               (content_stripped.startswith("@") and "总结" in content_stripped.split(" ", 1)[1].strip().split(" ", 1)[0]) or \
+               any(part.strip() == "总结" for part in content_stripped.split(" ", 1)):
+                is_trigger = True
+                # 如果消息以"@"开头，移除@部分
+                if content_stripped.startswith("@"):
+                    parts = content_stripped.split(" ", 1)
+                    if len(parts) > 1:
+                        content = parts[1].strip()
+                    else:
+                        content = ""
+                # 将"总结"关键词转换为命令格式
+                content = content.replace("总结", f"{trigger_prefix}总结", 1)  # 只替换第一个"总结"
+                clist = content.split()
+        
+        if not is_trigger:
+            return
+        
+        # 解析命令
+        start_time, limit, custom_prompt, target_session, password = self._parse_summary_command(clist[1:])
 
-            # 如果指定了目标会话，先检查是否在群聊中
-            if target_session:
-                if e_context['context'].get("isgroup", False):
-                    reply = Reply(ReplyType.ERROR, "指定会话总结功能仅支持私聊使用")
-                    e_context["reply"] = reply
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                
-                # 验证密码
-                config_password = self.config.get('summary_password', '')
-                if not config_password:
-                    reply = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法使用指定会话功能")
-                    e_context["reply"] = reply
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-                if not password or password != config_password:
-                    reply = Reply(ReplyType.ERROR, "访问密码错误")
-                    e_context["reply"] = reply
-                    e_context.action = EventAction.BREAK_PASS
-                    return
-
-            msg:ChatMessage = e_context['context']['msg']
-            session_id = msg.from_user_id
-            if self.config.get('channel_type', 'wx') == 'wx' and msg.from_user_nickname is not None:
-                session_id = msg.from_user_nickname
-
-            # 使用目标会话ID
-            if target_session:
-                session_id = target_session
-
-            records = self._get_records(session_id, start_time, limit)
-            
-            if not records:
-                reply = Reply(ReplyType.ERROR, f"没有找到{'指定会话的' if target_session else ''}聊天记录")
+        # 如果指定了目标会话，先检查是否在群聊中
+        if target_session:
+            if e_context['context'].get("isgroup", False):
+                reply = Reply(ReplyType.ERROR, "指定会话总结功能仅支持私聊使用")
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
                 return
             
-            # 准备聊天记录内容
-            query = self._check_tokens(records)
-            if not query:
-                reply = Reply(ReplyType.ERROR, "聊天记录为空")
+            # 验证密码
+            config_password = self.config.get('summary_password', '')
+            if not config_password:
+                reply = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法使用指定会话功能")
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+            if not password or password != config_password:
+                reply = Reply(ReplyType.ERROR, "访问密码错误")
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
                 return
 
-            # 发送处理中的提示
-            processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
-            e_context["channel"].send(processing_reply, e_context["context"])
-            
-            # 调用总结功能并传递给下一个插件
-            return self._chat_completion(query, e_context, custom_prompt, "summary")
+        msg:ChatMessage = e_context['context']['msg']
+        session_id = msg.from_user_id
+        if self.config.get('channel_type', 'wx') == 'wx' and msg.from_user_nickname is not None:
+            session_id = msg.from_user_nickname
+
+        # 使用目标会话ID
+        if target_session:
+            session_id = target_session
+
+        records = self._get_records(session_id, start_time, limit)
+        
+        if not records:
+            reply = Reply(ReplyType.ERROR, f"没有找到{'指定会话的' if target_session else ''}聊天记录")
+            e_context["reply"] = reply
+            e_context.action = EventAction.BREAK_PASS
+            return
+        
+        # 准备聊天记录内容
+        query = self._check_tokens(records)
+        if not query:
+            reply = Reply(ReplyType.ERROR, "聊天记录为空")
+            e_context["reply"] = reply
+            e_context.action = EventAction.BREAK_PASS
+            return
+
+        # 发送处理中的提示
+        processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
+        e_context["channel"].send(processing_reply, e_context["context"])
+        
+        # 调用总结功能并传递给下一个插件
+        return self._chat_completion(query, e_context, custom_prompt, "summary")
 
     def get_help_text(self, verbose = False, **kwargs):
         help_text = "聊天记录总结插件。\n"
