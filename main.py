@@ -115,6 +115,10 @@ class Summary(Plugin):
             self.handlers[Event.ON_HANDLE_CONTEXT] = self.on_handle_context
             self.handlers[Event.ON_RECEIVE_MESSAGE] = self.on_receive_message
             logger.info("[Summary] 初始化完成，配置: %s", self.config)
+
+            # 添加用户ID到昵称的缓存字典
+            self.user_nickname_cache = {}
+            self.group_name_cache = {}
         except Exception as e:
             logger.error(f"[Summary] 初始化失败: {e}")
             raise e
@@ -141,11 +145,24 @@ class Summary(Plugin):
     def _load_config(self):
         """从 config.json 加载配置"""
         try:
+            # 首先加载插件自己的配置
             config_path = os.path.join(os.path.dirname(__file__), "config.json")
-            if not os.path.exists(config_path):
-                return {}
-            with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            
+            # 加载主配置文件
+            main_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config.json")
+            if os.path.exists(main_config_path):
+                with open(main_config_path, "r", encoding="utf-8") as f:
+                    main_config = json.load(f)
+                    # 将主配置中的gewechat相关配置映射到插件配置中
+                    config['api_base_url'] = main_config.get('gewechat_base_url')
+                    config['api_token'] = main_config.get('gewechat_token')
+                    config['app_id'] = main_config.get('gewechat_app_id')
+            
+            return config
         except Exception as e:
             logger.error(f"[Summary] 加载配置失败: {e}")
             return {}
@@ -339,6 +356,75 @@ class Summary(Plugin):
         c.execute("SELECT * FROM chat_records WHERE sessionid=? and timestamp>? ORDER BY timestamp DESC LIMIT ?", (session_id, start_timestamp, limit))
         return c.fetchall()
 
+    def _get_user_nickname(self, user_id):
+        """获取用户昵称"""
+        if user_id in self.user_nickname_cache:
+            return self.user_nickname_cache[user_id]
+        
+        try:
+            # 调用API获取用户信息
+            response = requests.post(
+                f"{self.config.get('api_base_url')}/contacts/getBriefInfo",
+                headers={
+                    "X-GEWE-TOKEN": self.config.get('api_token')
+                },
+                json={
+                    "appId": self.config.get('app_id'),
+                    "wxids": [user_id]
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ret') == 200 and data.get('data'):
+                    nickname = data['data'][0].get('nickName', user_id)
+                    self.user_nickname_cache[user_id] = nickname
+                    return nickname
+        except Exception as e:
+            logger.error(f"[Summary] 获取用户昵称失败: {e}")
+        
+        return user_id
+
+    def _get_group_name(self, group_id):
+        """获取群名称"""
+        # 检查缓存
+        if group_id in self.group_name_cache:
+            logger.debug(f"[Summary] 从缓存获取群名称: {group_id} -> {self.group_name_cache[group_id]}")
+            return self.group_name_cache[group_id]
+        
+        try:
+            # 调用群信息API
+            api_url = f"{self.config.get('api_base_url')}/group/getChatroomInfo"
+            payload = {
+                "appId": self.config.get('app_id'),
+                "chatroomId": group_id
+            }
+            headers = {
+                "X-GEWE-TOKEN": self.config.get('api_token')
+            }
+            
+            response = requests.post(api_url, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ret') == 200 and data.get('data'):
+                    group_info = data['data']
+                    group_name = group_info.get('nickName')  # 使用 nickName 字段
+                    
+                    if group_name:
+                        self.group_name_cache[group_id] = group_name
+                        logger.info(f"[Summary] 成功获取群名称: {group_id} -> {group_name}")
+                        return group_name
+                    else:
+                        logger.warning(f"[Summary] API返回的群名为空 - Group ID: {group_id}")
+                        return group_id
+                else:
+                    logger.warning(f"[Summary] API返回数据异常: {data}")
+                    return group_id
+        except Exception as e:
+            logger.error(f"[Summary] 获取群名称失败: {e}")
+            return group_id
+
     def on_receive_message(self, e_context: EventContext):
         """处理接收到的消息"""
         context = e_context['context']
@@ -350,19 +436,16 @@ class Summary(Plugin):
             logger.debug(f"[Summary] 消息被过滤: {content}")
             return
         
-        username = None
-        session_id = cmsg.from_user_id
-        if self.config.get('channel_type', 'wx') == 'wx' and cmsg.from_user_nickname is not None:
-            session_id = cmsg.from_user_nickname
-
+        # 获取会话ID和用户名
         if context.get("isgroup", False):
-            username = cmsg.actual_user_nickname
-            if username is None:
-                username = cmsg.actual_user_id
+            # 群聊：使用群名作为session_id，用户昵称作为username
+            session_id = self._get_group_name(cmsg.from_user_id)
+            username = cmsg.actual_user_nickname or self._get_user_nickname(cmsg.actual_user_id)
         else:
-            username = cmsg.from_user_nickname
-            if username is None:
-                username = cmsg.from_user_id
+            # 单聊：使用用户昵称作为session_id和username
+            nickname = self._get_user_nickname(cmsg.from_user_id)
+            session_id = nickname
+            username = nickname
 
         is_triggered = False
         content = context.content
