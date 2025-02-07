@@ -28,7 +28,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.4",
+    version="1.5",
     author="lanvent",
 )
 class Summary(Plugin):
@@ -116,9 +116,6 @@ class Summary(Plugin):
             self.handlers[Event.ON_RECEIVE_MESSAGE] = self.on_receive_message
             logger.info("[Summary] 初始化完成，配置: %s", self.config)
 
-            # 添加用户ID到昵称的缓存字典
-            self.user_nickname_cache = {}
-            self.group_name_cache = {}
         except Exception as e:
             logger.error(f"[Summary] 初始化失败: {e}")
             raise e
@@ -356,74 +353,6 @@ class Summary(Plugin):
         c.execute("SELECT * FROM chat_records WHERE sessionid=? and timestamp>? ORDER BY timestamp DESC LIMIT ?", (session_id, start_timestamp, limit))
         return c.fetchall()
 
-    def _get_user_nickname(self, user_id):
-        """获取用户昵称"""
-        if user_id in self.user_nickname_cache:
-            return self.user_nickname_cache[user_id]
-        
-        try:
-            # 调用API获取用户信息
-            response = requests.post(
-                f"{self.config.get('api_base_url')}/contacts/getBriefInfo",
-                headers={
-                    "X-GEWE-TOKEN": self.config.get('api_token')
-                },
-                json={
-                    "appId": self.config.get('app_id'),
-                    "wxids": [user_id]
-                }
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('ret') == 200 and data.get('data'):
-                    nickname = data['data'][0].get('nickName', user_id)
-                    self.user_nickname_cache[user_id] = nickname
-                    return nickname
-        except Exception as e:
-            logger.error(f"[Summary] 获取用户昵称失败: {e}")
-        
-        return user_id
-
-    def _get_group_name(self, group_id):
-        """获取群名称"""
-        # 检查缓存
-        if group_id in self.group_name_cache:
-            logger.debug(f"[Summary] 从缓存获取群名称: {group_id} -> {self.group_name_cache[group_id]}")
-            return self.group_name_cache[group_id]
-        
-        try:
-            # 调用群信息API
-            api_url = f"{self.config.get('api_base_url')}/group/getChatroomInfo"
-            payload = {
-                "appId": self.config.get('app_id'),
-                "chatroomId": group_id
-            }
-            headers = {
-                "X-GEWE-TOKEN": self.config.get('api_token')
-            }
-            
-            response = requests.post(api_url, headers=headers, json=payload)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('ret') == 200 and data.get('data'):
-                    group_info = data['data']
-                    group_name = group_info.get('nickName')  # 使用 nickName 字段
-                    
-                    if group_name:
-                        self.group_name_cache[group_id] = group_name
-                        return group_name
-                    else:
-                        logger.warning(f"[Summary] API返回的群名为空 - Group ID: {group_id}")
-                        return group_id
-                else:
-                    logger.warning(f"[Summary] API返回数据异常: {data}")
-                    return group_id
-        except Exception as e:
-            logger.error(f"[Summary] 获取群名称失败: {e}")
-            return group_id
-
     def on_receive_message(self, e_context: EventContext):
         """处理接收到的消息"""
         context = e_context['context']
@@ -435,20 +364,19 @@ class Summary(Plugin):
             logger.debug(f"[Summary] 消息被过滤: {content}")
             return
         
-        # 获取会话ID和用户名
+        # 获取会话ID和用户名 - 使用 ChatMessage 对象的属性
         if context.get("isgroup", False):
             # 群聊：使用群名作为session_id，用户昵称作为username
-            session_id = self._get_group_name(cmsg.from_user_id)
-            username = cmsg.actual_user_nickname or self._get_user_nickname(cmsg.actual_user_id)
+            session_id = cmsg.other_user_nickname or cmsg.from_user_id  # 群名称
+            username = cmsg.actual_user_nickname or cmsg.actual_user_id  # 发送者昵称
             
             # 只有当content以用户ID开头且后面紧跟冒号时才清理
             if content.startswith(f"{cmsg.actual_user_id}:"):
                 content = content[len(cmsg.actual_user_id) + 1:].strip()
         else:
             # 单聊：使用用户昵称作为session_id和username
-            nickname = self._get_user_nickname(cmsg.from_user_id)
-            session_id = nickname
-            username = nickname
+            session_id = cmsg.other_user_nickname or cmsg.from_user_id
+            username = session_id
 
         is_triggered = False
         if context.get("isgroup", False):
@@ -683,7 +611,6 @@ class Summary(Plugin):
         context = e_context['context']
         content = context.content
         msg = context['msg']
-        logger.debug("[Summary] on_handle_context. content: %s" % content)
         
         # 检查是否是文本消息
         if context.type != ContextType.TEXT:
@@ -750,10 +677,14 @@ class Summary(Plugin):
                 e_context.action = EventAction.BREAK_PASS
                 return
 
-        msg:ChatMessage = e_context['context']['msg']
-        session_id = msg.from_user_id
-        if self.config.get('channel_type', 'wx') == 'wx' and msg.from_user_nickname is not None:
-            session_id = msg.from_user_nickname
+        msg = e_context['context']['msg']
+        
+        if context.get("isgroup", False):
+            # 群聊：使用群名作为session_id
+            session_id = msg.other_user_nickname or msg.from_user_id
+        else:
+            # 单聊：使用用户昵称作为session_id
+            session_id = msg.other_user_nickname or msg.from_user_id
 
         # 使用目标会话ID
         if target_session:
