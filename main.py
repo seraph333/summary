@@ -624,33 +624,8 @@ class Summary(Plugin):
         trigger_prefix = self.config.get('plugin_trigger_prefix', "$")
         clist = content.split()
         
-        # 检查是否包含触发命令
-        is_trigger = False
-        if clist[0].startswith(trigger_prefix):
-            # 使用$前缀触发
-            is_trigger = True
-        else:
-            # 检查是否是"总结"命令
-            # 1. 消息以"总结"开头
-            # 2. 消息为"@xxx 总结"格式
-            # 3. 消息为"总结 xxx"格式
-            content_stripped = content.strip()
-            if content_stripped.startswith("总结") or \
-               (content_stripped.startswith("@") and "总结" in content_stripped.split(" ", 1)[1].strip().split(" ", 1)[0]) or \
-               any(part.strip() == "总结" for part in content_stripped.split(" ", 1)):
-                is_trigger = True
-                # 如果消息以"@"开头，移除@部分
-                if content_stripped.startswith("@"):
-                    parts = content_stripped.split(" ", 1)
-                    if len(parts) > 1:
-                        content = parts[1].strip()
-                    else:
-                        content = ""
-                # 将"总结"关键词转换为命令格式
-                content = content.replace("总结", f"{trigger_prefix}总结", 1)  # 只替换第一个"总结"
-                clist = content.split()
-        
-        if not is_trigger:
+        # 检查是否以触发前缀开头
+        if not (clist and clist[0].startswith(trigger_prefix) and clist[0][1:] == "总结"):
             return
         
         # 解析命令
