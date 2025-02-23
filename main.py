@@ -28,8 +28,8 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.5",
-    author="lanvent",
+    version="1.5.1",
+    author="sofs2005",
 )
 class Summary(Plugin):
     # 默认配置值
@@ -564,8 +564,8 @@ class Summary(Plugin):
         $总结 -24h                    # 过去24小时内的消息
         $总结 100 自定义指令            # 最近100条消息，使用自定义指令
         $总结 -2h 100 自定义指令       # 过去2小时内的消息，最多100条，使用自定义指令
-        $总结 @群名称 密码 100          # 指定群的最近100条消息（需要密码验证）
-        $总结 @用户名 密码 -2h          # 指定用户过去2小时的消息（需要密码验证）
+        $总结 g群名称 密码 100          # 指定群的最近100条消息（需要密码验证）
+        $总结 u用户名 密码 -2h          # 指定用户过去2小时的消息（需要密码验证）
         """
         current_time = int(time.time())
         custom_prompt = ""
@@ -578,8 +578,8 @@ class Summary(Plugin):
         i = 0
         while i < len(command_parts):
             part = command_parts[i]
-            if part.startswith('@'):
-                target_session = part[1:]  # 去掉@符号
+            if part.startswith('g') or part.startswith('u'):
+                target_session = part[1:]  # 去掉g或u前缀
                 # 检查下一个参数是否为密码
                 if i + 1 < len(command_parts):
                     password = command_parts[i + 1]
@@ -700,8 +700,8 @@ class Summary(Plugin):
    - {trigger_prefix}总结 -24h 100 (总结24小时内最近100条消息)
 
 2. 总结指定会话(需要密码):
-   - {trigger_prefix}总结 @群名称 密码 100 (总结指定群最近100条消息)
-   - {trigger_prefix}总结 @用户名 密码 -2h (总结指定用户最近2小时消息)
+   - {trigger_prefix}总结 g群名称 密码 100 (总结指定群最近100条消息)
+   - {trigger_prefix}总结 u用户名 密码 -2h (总结指定用户最近2小时消息)
 
-你也可以添加自定义指令，如：{trigger_prefix}总结 @群名称 密码 100 帮我找出重要的会议内容"""
+你也可以添加自定义指令，如：{trigger_prefix}总结 g群名称 密码 100 帮我找出重要的会议内容"""
         return help_text
