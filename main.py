@@ -365,7 +365,7 @@ class Summary(Plugin):
             return
     
         # 如果是表情消息（XML 格式），替换为“表情”
-        if content.startswith("<msg><emoji") and content.endswith("</emoji></msg>"):
+        if content.startswith("<msg><emoji") and content.endswith("</msg>"):
             content = "表情"
             logger.debug(f"[Summary] 检测到表情消息，已替换为“表情”")
     
