@@ -357,19 +357,24 @@ class Summary(Plugin):
         """处理接收到的消息"""
         context = e_context['context']
         cmsg : ChatMessage = e_context['context']['msg']
-        
+    
         # 检查消息内容是否需要过滤
         content = context.content
         if (('#' in content or '$' in content) and len(content) < 50):
             logger.debug(f"[Summary] 消息被过滤: {content}")
             return
-        
+    
+        # 如果是表情消息（XML 格式），替换为“表情”
+        if content.startswith("<msg><emoji") and content.endswith("</emoji></msg>"):
+            content = "表情"
+            logger.debug(f"[Summary] 检测到表情消息，已替换为“表情”")
+    
         # 获取会话ID和用户名 - 使用 ChatMessage 对象的属性
         if context.get("isgroup", False):
             # 群聊：使用群名作为session_id，用户昵称作为username
             session_id = cmsg.other_user_nickname or cmsg.from_user_id  # 群名称
             username = cmsg.actual_user_nickname or cmsg.actual_user_id  # 发送者昵称
-            
+        
             # 只有当content以用户ID开头且后面紧跟冒号时才清理
             if content.startswith(f"{cmsg.actual_user_id}:"):
                 content = content[len(cmsg.actual_user_id) + 1:].strip()
@@ -391,6 +396,7 @@ class Summary(Plugin):
             if match_prefix is not None:
                 is_triggered = True
 
+        # 将消息插入数据库
         self._insert_record(session_id, cmsg.msg_id, username, content, str(context.type), cmsg.create_time, int(is_triggered))
         logger.debug("[Summary] {}:{} ({})" .format(username, content, session_id))
         
