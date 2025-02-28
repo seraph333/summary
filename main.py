@@ -28,7 +28,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.5.1",
+    version="1.6.0",
     author="sofs2005",
 )
 class Summary(Plugin):
@@ -77,6 +77,11 @@ class Summary(Plugin):
         super().__init__()
         try:
             self.config = self._load_config()
+            
+            # 加载白名单配置并处理特殊字符
+            self.record_all = self.config.get("record_all", True)  # 默认记录所有会话
+            self.whitelist_groups = set(self._normalize_names(self.config.get("whitelist_groups", [])))  # 群聊白名单
+            self.whitelist_users = set(self._normalize_names(self.config.get("whitelist_users", [])))   # 私聊白名单
             
             #加载多模态LLM配置
             self.multimodal_llm_api_base = self.config.get("multimodal_llm_api_base", "")
@@ -353,6 +358,71 @@ class Summary(Plugin):
         c.execute("SELECT * FROM chat_records WHERE sessionid=? and timestamp>? ORDER BY timestamp DESC LIMIT ?", (session_id, start_timestamp, limit))
         return c.fetchall()
 
+    def _normalize_name(self, name):
+        """
+        标准化处理名称中的特殊字符
+        
+        :param name: 原始名称
+        :return: 标准化后的名称
+        """
+        if not name:
+            return name
+        # 替换常见的特殊字符为其转义形式
+        replacements = {
+            '\\': '\\\\',  # 反斜杠
+            '*': '\\*',    # 星号
+            '?': '\\?',    # 问号
+            '[': '\\[',    # 方括号
+            ']': '\\]',
+            '^': '\\^',    # 插入符号
+            '$': '\\$',    # 美元符号
+            '.': '\\.',    # 点号
+            '|': '\\|',    # 竖线
+            '+': '\\+',    # 加号
+            '(': '\\(',    # 圆括号
+            ')': '\\)',
+            '{': '\\{',    # 花括号
+            '}': '\\}',
+            '/': '\\/'     # 正斜杠
+        }
+        normalized = name
+        for char, escaped in replacements.items():
+            normalized = normalized.replace(char, escaped)
+        return normalized
+
+    def _normalize_names(self, names):
+        """
+        标准化处理名称列表中的特殊字符
+        
+        :param names: 名称列表
+        :return: 标准化后的名称列表
+        """
+        return [self._normalize_name(name) for name in names]
+
+    def _should_record_chat(self, context, session_id, username):
+        """
+        检查是否应该记录该会话的消息
+        
+        :param context: 消息上下文
+        :param session_id: 会话ID
+        :param username: 用户名
+        :return: bool 是否应该记录
+        """
+        # 如果配置为记录所有会话，直接返回True
+        if self.record_all:
+            return True
+            
+        # 标准化处理会话ID
+        normalized_session_id = self._normalize_name(session_id)
+            
+        # 检查是否是群聊
+        if context.get("isgroup", False):
+            # 检查群名是否在白名单中
+            return normalized_session_id in self.whitelist_groups
+        else:
+            # 检查用户名是否在白名单中
+            return normalized_session_id in self.whitelist_users
+
     def on_receive_message(self, e_context: EventContext):
         """处理接收到的消息"""
         context = e_context['context']
@@ -360,6 +430,14 @@ class Summary(Plugin):
         
         # 检查消息内容是否需要过滤
         content = context.content
+        
+        # 过滤自定义表情消息
+        if content and isinstance(content, str):
+            if content.startswith('<msg><emoji') and 'type="2"' in content:
+                logger.debug(f"[Summary] 自定义表情消息被过滤")
+                return
+                
+        # 过滤短命令消息
         if (('#' in content or '$' in content) and len(content) < 50):
             logger.debug(f"[Summary] 消息被过滤: {content}")
             return
@@ -377,6 +455,11 @@ class Summary(Plugin):
             # 单聊：使用用户昵称作为session_id和username
             session_id = cmsg.other_user_nickname or cmsg.from_user_id
             username = session_id
+
+        # 检查是否应该记录该会话的消息
+        if not self._should_record_chat(context, session_id, username):
+            logger.debug(f"[Summary] 会话未在白名单中，跳过记录: {session_id}")
+            return
 
         is_triggered = False
         if context.get("isgroup", False):
