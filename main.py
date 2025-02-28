@@ -20,7 +20,7 @@ from channel.chat_channel import check_contain, check_prefix
 from channel.chat_message import ChatMessage
 from common.log import logger
 from plugins import *
-
+from xml.etree import ElementTree as ET  # 导入 XML 解析模块
 
 @plugins.register(
     name="Summary",
@@ -365,9 +365,26 @@ class Summary(Plugin):
             return
     
         # 如果是表情消息（XML 格式），替换为“表情”
-        if content.startswith("<msg><emoji") and content.endswith("</msg>"):
+        if content.startswith("<msg><emoji") and content.endswith("</emoji></msg>"):
             content = "表情"
             logger.debug(f"[Summary] 检测到表情消息，已替换为“表情”")
+        
+        # 如果是合并聊天记录消息（XML 格式），提取 <des> 标签中的内容
+        elif content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
+            try:
+                # 解析 XML
+                root = ET.fromstring(content)
+                des_tag = root.find(".//des")  # 查找 <des> 标签
+                if des_tag is not None and des_tag.text:
+                    # 提取 <des> 标签中的内容
+                    content = des_tag.text.strip()
+                    logger.debug(f"[Summary] 检测到合并聊天记录，已提取 <des> 内容: {content}")
+                else:
+                    content = "聊天记录（无内容）"
+                    logger.debug(f"[Summary] 检测到合并聊天记录，但 <des> 标签为空")
+            except ET.ParseError as e:
+                logger.error(f"[Summary] XML 解析失败: {e}")
+                content = "聊天记录（解析失败）"
     
         # 获取会话ID和用户名 - 使用 ChatMessage 对象的属性
         if context.get("isgroup", False):
