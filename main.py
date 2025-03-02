@@ -12,6 +12,7 @@ import base64
 from io import BytesIO
 from PIL import Image
 import shutil
+import re  # 导入正则表达式模块
 
 import plugins
 from bridge.context import ContextType
@@ -28,7 +29,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.6.0",
+    version="1.6.1",
     author="sofs2005",
 )
 class Summary(Plugin):
@@ -437,6 +438,13 @@ class Summary(Plugin):
                 logger.debug(f"[Summary] 自定义表情消息被过滤")
                 return
                 
+            # 过滤XML格式的消息
+            if content.startswith('<') and '>' in content and ('</' in content or '/>' in content):
+                # 使用正则表达式检查是否是XML格式
+                if re.match(r'^\s*<\?xml|^\s*<[a-zA-Z][a-zA-Z0-9]*(\s+[^>]*)?>(.*?)</[a-zA-Z][a-zA-Z0-9]*>|^\s*<[a-zA-Z][a-zA-Z0-9]*(\s+[^>]*)?/>', content, re.DOTALL):
+                    logger.debug(f"[Summary] XML格式消息被过滤: {content[:50]}...")
+                    return
+        
         # 过滤短命令消息
         if (('#' in content or '$' in content) and len(content) < 50):
             logger.debug(f"[Summary] 消息被过滤: {content}")
