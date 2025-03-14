@@ -29,7 +29,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.6.1",
+    version="1.6.3",
     author="sofs2005",
 )
 class Summary(Plugin):
@@ -83,6 +83,7 @@ class Summary(Plugin):
             self.record_all = self.config.get("record_all", True)  # 默认记录所有会话
             self.whitelist_groups = set(self._normalize_names(self.config.get("whitelist_groups", [])))  # 群聊白名单
             self.whitelist_users = set(self._normalize_names(self.config.get("whitelist_users", [])))   # 私聊白名单
+            self.use_fuzzy_matching = self.config.get("use_fuzzy_matching", True)  # 默认使用模糊匹配
             
             #加载多模态LLM配置
             self.multimodal_llm_api_base = self.config.get("multimodal_llm_api_base", "")
@@ -418,11 +419,35 @@ class Summary(Plugin):
             
         # 检查是否是群聊
         if context.get("isgroup", False):
-            # 检查群名是否在白名单中
-            return normalized_session_id in self.whitelist_groups
+            # 根据配置选择精确匹配或模糊匹配
+            if self.use_fuzzy_matching:
+                # 模糊匹配：检查任一白名单群名是否包含在会话ID中或会话ID包含在任一白名单群名中
+                for group_name in self.whitelist_groups:
+                    if group_name in normalized_session_id or normalized_session_id in group_name:
+                        logger.debug(f"[Summary] 群聊模糊匹配成功: 白名单项 '{group_name}' 与会话ID '{normalized_session_id}' 匹配")
+                        return True
+                return False
+            else:
+                # 精确匹配：检查群名是否在白名单中
+                result = normalized_session_id in self.whitelist_groups
+                if result:
+                    logger.debug(f"[Summary] 群聊精确匹配成功: 会话ID '{normalized_session_id}' 在白名单中")
+                return result
         else:
-            # 检查用户名是否在白名单中
-            return normalized_session_id in self.whitelist_users
+            # 根据配置选择精确匹配或模糊匹配
+            if self.use_fuzzy_matching:
+                # 模糊匹配：检查任一白名单用户名是否包含在会话ID中或会话ID包含在任一白名单用户名中
+                for user_name in self.whitelist_users:
+                    if user_name in normalized_session_id or normalized_session_id in user_name:
+                        logger.debug(f"[Summary] 私聊模糊匹配成功: 白名单项 '{user_name}' 与会话ID '{normalized_session_id}' 匹配")
+                        return True
+                return False
+            else:
+                # 精确匹配：检查用户名是否在白名单中
+                result = normalized_session_id in self.whitelist_users
+                if result:
+                    logger.debug(f"[Summary] 私聊精确匹配成功: 会话ID '{normalized_session_id}' 在白名单中")
+                return result
 
     def on_receive_message(self, e_context: EventContext):
         """处理接收到的消息"""
@@ -697,6 +722,34 @@ class Summary(Plugin):
         custom_prompt = custom_prompt.strip()
         return start_timestamp, limit, custom_prompt, target_session, password
 
+    def _get_all_session_ids(self):
+        """获取数据库中所有不同的会话ID"""
+        c = self.conn.cursor()
+        c.execute("SELECT DISTINCT sessionid FROM chat_records")
+        return [row[0] for row in c.fetchall()]
+
+    def _fuzzy_match_sessions(self, target_pattern, is_group=True):
+        """
+        模糊匹配会话ID
+        
+        :param target_pattern: 要匹配的模式
+        :param is_group: 是否是群聊
+        :return: 匹配到的会话ID列表
+        """
+        all_sessions = self._get_all_session_ids()
+        matched_sessions = []
+        
+        # 标准化处理目标模式
+        normalized_pattern = self._normalize_name(target_pattern)
+        
+        for session_id in all_sessions:
+            normalized_session = self._normalize_name(session_id)
+            # 模糊匹配：检查会话ID是否包含模式或模式是否包含会话ID
+            if normalized_pattern in normalized_session or normalized_session in normalized_pattern:
+                matched_sessions.append(session_id)
+        
+        return matched_sessions
+
     def on_handle_context(self, e_context: EventContext):
         """处理上下文，进行总结"""
         context = e_context['context']
@@ -742,19 +795,66 @@ class Summary(Plugin):
                 e_context["reply"] = reply
                 e_context.action = EventAction.BREAK_PASS
                 return
-
-        msg = e_context['context']['msg']
+            
+            # 判断是否是群聊目标会话
+            is_group_target = clist[1].startswith('g') if len(clist) > 1 else False
+            
+            # 对指定的会话使用模糊匹配
+            matched_sessions = self._fuzzy_match_sessions(target_session, is_group_target)
+            
+            if not matched_sessions:
+                reply = Reply(ReplyType.ERROR, f"没有找到匹配的会话")
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+            elif len(matched_sessions) > 1:
+                # 返回匹配结果让用户选择
+                match_list = "\n".join([f"{i+1}. {session}" for i, session in enumerate(matched_sessions)])
+                reply_text = f"找到多个匹配的会话，请选择要总结的会话编号：\n{match_list}\n\n" \
+                             f"请回复：{trigger_prefix}总结选择 [编号] [其他参数]"
+                
+                # 保存匹配结果到临时存储
+                self._last_matched_sessions = matched_sessions
+                
+                reply = Reply(ReplyType.TEXT, reply_text)
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+            else:
+                # 只有一个匹配，直接使用
+                session_id = matched_sessions[0]
         
-        if context.get("isgroup", False):
-            # 群聊：使用群名作为session_id
-            session_id = msg.other_user_nickname or msg.from_user_id
+        # 检查是否是总结选择命令
+        elif len(clist) >= 2 and clist[1] == "选择" and len(clist) >= 3 and clist[2].isdigit():
+            # 获取上次匹配的结果
+            if not hasattr(self, '_last_matched_sessions') or not self._last_matched_sessions:
+                reply = Reply(ReplyType.ERROR, "无效的选择或会话列表已过期，请重新执行总结命令")
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+                
+            choice = int(clist[2])
+            
+            if choice < 1 or choice > len(self._last_matched_sessions):
+                reply = Reply(ReplyType.ERROR, f"无效的选择，请选择1到{len(self._last_matched_sessions)}之间的数字")
+                e_context["reply"] = reply
+                e_context.action = EventAction.BREAK_PASS
+                return
+            
+            session_id = self._last_matched_sessions[choice - 1]
+            # 移除选择参数，保留其他参数
+            new_params = clist[3:]
+            # 重新解析剩余参数
+            start_time, limit, custom_prompt, _, _ = self._parse_summary_command(new_params)
         else:
-            # 单聊：使用用户昵称作为session_id
-            session_id = msg.other_user_nickname or msg.from_user_id
-
-        # 使用目标会话ID
-        if target_session:
-            session_id = target_session
+            msg = e_context['context']['msg']
+            
+            if context.get("isgroup", False):
+                # 群聊：使用群名作为session_id
+                session_id = msg.other_user_nickname or msg.from_user_id
+            else:
+                # 单聊：使用用户昵称作为session_id
+                session_id = msg.other_user_nickname or msg.from_user_id
 
         records = self._get_records(session_id, start_time, limit)
         
@@ -793,6 +893,11 @@ class Summary(Plugin):
 2. 总结指定会话(需要密码):
    - {trigger_prefix}总结 g群名称 密码 100 (总结指定群最近100条消息)
    - {trigger_prefix}总结 u用户名 密码 -2h (总结指定用户最近2小时消息)
+
+3. 白名单设置:
+   - 默认启用模糊匹配，只要配置中的名称部分包含实际会话名称或实际会话名称包含配置名称即可匹配成功
+   - 例如：白名单中有"测试群"，则"测试群123"和"123测试群"都会被记录
+   - 可在配置文件中设置 "use_fuzzy_matching": false 来禁用模糊匹配，改用精确匹配
 
 你也可以添加自定义指令，如：{trigger_prefix}总结 g群名称 密码 100 帮我找出重要的会议内容"""
         return help_text
