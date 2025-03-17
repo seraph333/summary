@@ -29,7 +29,7 @@ from plugins import *
     hidden=False,
     enabled=True,
     desc="聊天记录总结助手",
-    version="1.6.3",
+    version="1.6.4",
     author="sofs2005",
 )
 class Summary(Plugin):
@@ -768,116 +768,141 @@ class Summary(Plugin):
         trigger_prefix = self.config.get('plugin_trigger_prefix', "$")
         clist = content.split()
         
-        # 检查是否以触发前缀开头
-        if not (clist and clist[0].startswith(trigger_prefix) and clist[0][1:] == "总结"):
-            return
-        
-        # 解析命令
-        start_time, limit, custom_prompt, target_session, password = self._parse_summary_command(clist[1:])
-
-        # 如果指定了目标会话，先检查是否在群聊中
-        if target_session:
-            if e_context['context'].get("isgroup", False):
-                reply = Reply(ReplyType.ERROR, "指定会话总结功能仅支持私聊使用")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            
-            # 验证密码
-            config_password = self.config.get('summary_password', '')
-            if not config_password:
-                reply = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法使用指定会话功能")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            if not password or password != config_password:
-                reply = Reply(ReplyType.ERROR, "访问密码错误")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            
-            # 判断是否是群聊目标会话
-            is_group_target = clist[1].startswith('g') if len(clist) > 1 else False
-            
-            # 对指定的会话使用模糊匹配
-            matched_sessions = self._fuzzy_match_sessions(target_session, is_group_target)
-            
-            if not matched_sessions:
-                reply = Reply(ReplyType.ERROR, f"没有找到匹配的会话")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            elif len(matched_sessions) > 1:
-                # 返回匹配结果让用户选择
-                match_list = "\n".join([f"{i+1}. {session}" for i, session in enumerate(matched_sessions)])
-                reply_text = f"找到多个匹配的会话，请选择要总结的会话编号：\n{match_list}\n\n" \
-                             f"请回复：{trigger_prefix}总结选择 [编号] [其他参数]"
-                
-                # 保存匹配结果到临时存储
-                self._last_matched_sessions = matched_sessions
-                
-                reply = Reply(ReplyType.TEXT, reply_text)
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            else:
-                # 只有一个匹配，直接使用
-                session_id = matched_sessions[0]
-        
         # 检查是否是总结选择命令
-        elif len(clist) >= 2 and clist[1] == "选择" and len(clist) >= 3 and clist[2].isdigit():
-            # 获取上次匹配的结果
-            if not hasattr(self, '_last_matched_sessions') or not self._last_matched_sessions:
-                reply = Reply(ReplyType.ERROR, "无效的选择或会话列表已过期，请重新执行总结命令")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
+        if clist and clist[0].startswith(trigger_prefix):
+            command = clist[0][len(trigger_prefix):]  # 去掉触发前缀
+            
+            # 处理"总结选择"命令
+            if command == "总结选择" and len(clist) >= 2 and clist[1].isdigit():
+                # 获取上次匹配的结果
+                if not hasattr(self, '_last_matched_sessions') or not self._last_matched_sessions:
+                    reply = Reply(ReplyType.ERROR, "无效的选择或会话列表已过期，请重新执行总结命令")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                    
+                choice = int(clist[1])
                 
-            choice = int(clist[2])
-            
-            if choice < 1 or choice > len(self._last_matched_sessions):
-                reply = Reply(ReplyType.ERROR, f"无效的选择，请选择1到{len(self._last_matched_sessions)}之间的数字")
-                e_context["reply"] = reply
-                e_context.action = EventAction.BREAK_PASS
-                return
-            
-            session_id = self._last_matched_sessions[choice - 1]
-            # 移除选择参数，保留其他参数
-            new_params = clist[3:]
-            # 重新解析剩余参数
-            start_time, limit, custom_prompt, _, _ = self._parse_summary_command(new_params)
-        else:
-            msg = e_context['context']['msg']
-            
-            if context.get("isgroup", False):
-                # 群聊：使用群名作为session_id
-                session_id = msg.other_user_nickname or msg.from_user_id
-            else:
-                # 单聊：使用用户昵称作为session_id
-                session_id = msg.other_user_nickname or msg.from_user_id
+                if choice < 1 or choice > len(self._last_matched_sessions):
+                    reply = Reply(ReplyType.ERROR, f"无效的选择，请选择1到{len(self._last_matched_sessions)}之间的数字")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                
+                session_id = self._last_matched_sessions[choice - 1]
+                # 移除选择参数，保留其他参数
+                new_params = clist[2:]
+                # 重新解析剩余参数
+                start_time, limit, custom_prompt, _, _ = self._parse_summary_command(new_params)
+                
+                records = self._get_records(session_id, start_time, limit)
+                
+                if not records:
+                    reply = Reply(ReplyType.ERROR, f"没有找到指定会话的聊天记录")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                
+                # 准备聊天记录内容
+                query = self._check_tokens(records)
+                if not query:
+                    reply = Reply(ReplyType.ERROR, "聊天记录为空")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
 
-        records = self._get_records(session_id, start_time, limit)
-        
-        if not records:
-            reply = Reply(ReplyType.ERROR, f"没有找到{'指定会话的' if target_session else ''}聊天记录")
-            e_context["reply"] = reply
-            e_context.action = EventAction.BREAK_PASS
-            return
-        
-        # 准备聊天记录内容
-        query = self._check_tokens(records)
-        if not query:
-            reply = Reply(ReplyType.ERROR, "聊天记录为空")
-            e_context["reply"] = reply
-            e_context.action = EventAction.BREAK_PASS
-            return
+                # 发送处理中的提示
+                processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
+                e_context["channel"].send(processing_reply, e_context["context"])
+                
+                # 调用总结功能并传递给下一个插件
+                return self._chat_completion(query, e_context, custom_prompt, "summary")
+            
+            # 检查是否是普通总结命令
+            elif command == "总结":
+                # 解析命令
+                start_time, limit, custom_prompt, target_session, password = self._parse_summary_command(clist[1:])
 
-        # 发送处理中的提示
-        processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
-        e_context["channel"].send(processing_reply, e_context["context"])
-        
-        # 调用总结功能并传递给下一个插件
-        return self._chat_completion(query, e_context, custom_prompt, "summary")
+                # 如果指定了目标会话，先检查是否在群聊中
+                if target_session:
+                    if e_context['context'].get("isgroup", False):
+                        reply = Reply(ReplyType.ERROR, "指定会话总结功能仅支持私聊使用")
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    
+                    # 验证密码
+                    config_password = self.config.get('summary_password', '')
+                    if not config_password:
+                        reply = Reply(ReplyType.ERROR, "管理员未设置访问密码，无法使用指定会话功能")
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    if not password or password != config_password:
+                        reply = Reply(ReplyType.ERROR, "访问密码错误")
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    
+                    # 判断是否是群聊目标会话
+                    is_group_target = clist[1].startswith('g') if len(clist) > 1 else False
+                    
+                    # 对指定的会话使用模糊匹配
+                    matched_sessions = self._fuzzy_match_sessions(target_session, is_group_target)
+                    
+                    if not matched_sessions:
+                        reply = Reply(ReplyType.ERROR, f"没有找到匹配的会话")
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    elif len(matched_sessions) > 1:
+                        # 返回匹配结果让用户选择
+                        match_list = "\n".join([f"{i+1}. {session}" for i, session in enumerate(matched_sessions)])
+                        reply_text = f"找到多个匹配的会话，请选择要总结的会话编号：\n{match_list}\n\n" \
+                                     f"请回复：{trigger_prefix}总结选择 [编号] [其他参数]"
+                        
+                        # 保存匹配结果到临时存储
+                        self._last_matched_sessions = matched_sessions
+                        
+                        reply = Reply(ReplyType.TEXT, reply_text)
+                        e_context["reply"] = reply
+                        e_context.action = EventAction.BREAK_PASS
+                        return
+                    else:
+                        # 只有一个匹配，直接使用
+                        session_id = matched_sessions[0]
+                else:
+                    msg = e_context['context']['msg']
+                    
+                    if context.get("isgroup", False):
+                        # 群聊：使用群名作为session_id
+                        session_id = msg.other_user_nickname or msg.from_user_id
+                    else:
+                        # 单聊：使用用户昵称作为session_id
+                        session_id = msg.other_user_nickname or msg.from_user_id
+
+                records = self._get_records(session_id, start_time, limit)
+                
+                if not records:
+                    reply = Reply(ReplyType.ERROR, f"没有找到{'指定会话的' if target_session else ''}聊天记录")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+                
+                # 准备聊天记录内容
+                query = self._check_tokens(records)
+                if not query:
+                    reply = Reply(ReplyType.ERROR, "聊天记录为空")
+                    e_context["reply"] = reply
+                    e_context.action = EventAction.BREAK_PASS
+                    return
+
+                # 发送处理中的提示
+                processing_reply = Reply(ReplyType.TEXT, "🎉正在为您生成总结，请稍候...")
+                e_context["channel"].send(processing_reply, e_context["context"])
+                
+                # 调用总结功能并传递给下一个插件
+                return self._chat_completion(query, e_context, custom_prompt, "summary")
 
     def get_help_text(self, verbose = False, **kwargs):
         help_text = "聊天记录总结插件。\n"
