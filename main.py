@@ -456,7 +456,7 @@ class Summary(Plugin):
         
         # 检查消息内容是否需要过滤
         content = context.content
-        
+        """
         # 过滤自定义表情消息
         if content and isinstance(content, str):
             if content.startswith('<msg><emoji') and 'type="2"' in content:
@@ -469,7 +469,34 @@ class Summary(Plugin):
                 if re.match(r'^\s*<\?xml|^\s*<[a-zA-Z][a-zA-Z0-9]*(\s+[^>]*)?>(.*?)</[a-zA-Z][a-zA-Z0-9]*>|^\s*<[a-zA-Z][a-zA-Z0-9]*(\s+[^>]*)?/>', content, re.DOTALL):
                     logger.debug(f"[Summary] XML格式消息被过滤: {content[:50]}...")
                     return
+        """
+        # 如果是表情消息（XML 格式），替换为“表情”
+        if content.startswith("<msg><emoji") and content.endswith("</msg>"):
+            content = "表情"
+            logger.debug(f"[Summary] 检测到表情消息，已替换为“表情”")
         
+        # 如果是语音消息（XML 格式），替换为“语音”
+        if content.startswith("<msg><voicemsg") and content.endswith("</msg>"):
+            content = "语音"
+            logger.debug(f"[Summary] 检测到语音消息，已替换为“语音”")
+        
+        # 如果是合并聊天记录消息（XML 格式），提取 <des> 标签中的内容
+        elif content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
+            try:
+                # 解析 XML
+                root = ET.fromstring(content)
+                des_tag = root.find(".//des")  # 查找 <des> 标签
+                if des_tag is not None and des_tag.text:
+                    # 提取 <des> 标签中的内容
+                    content = des_tag.text.strip()
+                    logger.debug(f"[Summary] 检测到合并聊天记录，已提取 <des> 内容: {content}")
+                else:
+                    content = "聊天记录（无内容）"
+                    logger.debug(f"[Summary] 检测到合并聊天记录，但 <des> 标签为空")
+            except ET.ParseError as e:
+                logger.error(f"[Summary] XML 解析失败: {e}")
+                content = "聊天记录（解析失败）"
+                
         # 过滤短命令消息
         if (('#' in content or '$' in content) and len(content) < 50):
             logger.debug(f"[Summary] 消息被过滤: {content}")
