@@ -21,7 +21,7 @@ from channel.chat_channel import check_contain, check_prefix
 from channel.chat_message import ChatMessage
 from common.log import logger
 from plugins import *
-
+import xml.etree.ElementTree as ET
 
 @plugins.register(
     name="Summary",
@@ -481,7 +481,7 @@ class Summary(Plugin):
             logger.debug(f"[Summary] 检测到语音消息，已替换为“语音”")
         
         # 如果是合并聊天记录消息（XML 格式），提取 <des> 标签中的内容
-        elif content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
+        if content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
             try:
                 # 解析 XML
                 root = ET.fromstring(content)
@@ -496,6 +496,23 @@ class Summary(Plugin):
             except ET.ParseError as e:
                 logger.error(f"[Summary] XML 解析失败: {e}")
                 content = "聊天记录（解析失败）"
+
+        # 如果是文件消息（XML 格式），提取 <title> 标签中的内容
+        elif content.startswith("<?xml version=\"1.0\"?>") and "<title>" in content:
+            try:
+                # 解析 XML
+                root = ET.fromstring(content)
+                title_tag = root.find(".//title")  # 查找 <des> 标签
+                if title_tag is not None and title_tag.text:
+                    # 提取 <title> 标签中的内容
+                    content = title_tag.text.strip()
+                    logger.debug(f"[Summary] 检测到文件，已提取 <title> 内容: {content}")
+                else:
+                    content = "文件（无标题）"
+                    logger.debug(f"[Summary] 检测到文件，但 <title> 标签为空")
+            except ET.ParseError as e:
+                logger.error(f"[Summary] XML 解析失败: {e}")
+                content = "文件（解析失败）"
                 
         # 过滤短命令消息
         if (('#' in content or '$' in content) and len(content) < 50):
