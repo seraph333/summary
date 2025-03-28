@@ -470,18 +470,26 @@ class Summary(Plugin):
                     logger.debug(f"[Summary] XML格式消息被过滤: {content[:50]}...")
                     return
         """
+
+        # 新增：使用正则表达式匹配特殊格式消息
+        special_msg_pattern = re.compile(r'「.*?:.*?」-+\s*(.*)')
+        match = special_msg_pattern.fullmatch(content)
+        if match and match.group(1):
+            content = match.group(1).strip()
+            logger.debug(f"[Summary] 检测到特殊格式消息，已提取实际内容: {content}")
+
         # 如果是表情消息（XML 格式），替换为“表情”
         if content.startswith("<msg><emoji") and content.endswith("</msg>"):
             content = "表情"
             logger.debug(f"[Summary] 检测到表情消息，已替换为“表情”")
         
         # 如果是语音消息（XML 格式），替换为“语音”
-        if content.startswith("<msg><voicemsg") and content.endswith("</msg>"):
+        elif content.startswith("<msg><voicemsg") and content.endswith("</msg>"):
             content = "语音"
             logger.debug(f"[Summary] 检测到语音消息，已替换为“语音”")
         
         # 如果是合并聊天记录消息（XML 格式），提取 <des> 标签中的内容
-        if content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
+        elif content.startswith("<?xml version=\"1.0\"?>") and "<title>群聊的聊天记录</title>" in content:
             try:
                 # 解析 XML
                 root = ET.fromstring(content)
@@ -513,7 +521,7 @@ class Summary(Plugin):
             except ET.ParseError as e:
                 logger.error(f"[Summary] XML 解析失败: {e}")
                 content = "文件（解析失败）"
-                
+        
         # 过滤短命令消息
         if (('#' in content or '$' in content) and len(content) < 50):
             logger.debug(f"[Summary] 消息被过滤: {content}")
